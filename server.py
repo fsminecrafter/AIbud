@@ -5,16 +5,19 @@ Ubuntu 22.04 LTS target (AML-S905X-CC / Le Potato)
 
 Install deps:
   curl -fsSL https://ollama.com/install.sh | sh
-  ollama pull llama3.2:3b          # text + JSON (~2GB, fits in 4GB RAM)
-  ollama pull moondream            # vision model (~1.7GB) — sees camera frames
-  sudo pip3 install flask lgpio pillow requests
+  ollama pull llama3.2:3b
+  ollama pull moondream
+  sudo pip3 install flask lgpio pillow requests --break-system-packages
 
-GPIO wiring (Le Potato AML-S905X-CC 40-pin header):
-  Servo signal  → physical pin 33  (gpiochip0 line 10)
-  DC motor PWM  → physical pin 12  (gpiochip1 line 116)
-  DC motor dir1 → physical pin 16  (gpiochip1 line 118)
-  DC motor dir2 → physical pin 18  (gpiochip1 line 119)
-  GND           → pins 6, 9, 14...
+GPIO wiring — verified chip/line via `lgpio info PIN gpiod`:
+  Physical pin 12  → chip 0  line 6   — DC motor PWM  (lgpio tx_pwm works here)
+  Physical pin 16  → chip 1  line 93  — DC motor dir1
+  Physical pin 18  → chip 1  line 94  — DC motor dir2
+  Physical pin 33  → chip 1  line 85  — Servo signal  (bit-bang, NOT tx_pwm)
+  GND              → pins 6, 9, 14…
+
+NOTE: lgpio.tx_pwm() only works on gpiochip0. Pins 16/18/33 are on gpiochip1
+so direction pins are plain digital writes and servo uses a background thread.
 
 Run:
   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=lepotato.local"
@@ -32,10 +35,10 @@ import requests as req
 from flask import Flask, request, jsonify, send_from_directory
 
 # ── OLLAMA CONFIG ─────────────────────────────────────────────────────────────
-OLLAMA_URL        = "http://localhost:11434"
-VISION_MODEL      = "moondream"       # handles camera frames
-TEXT_MODEL        = "llama3.2:3b"     # handles text-only + memory cleanup
-OLLAMA_TIMEOUT    = 60                # seconds — 3b on ARM can be slow
+OLLAMA_URL     = "http://localhost:11434"
+VISION_MODEL   = "moondream"
+TEXT_MODEL     = "llama3.2:3b"
+OLLAMA_TIMEOUT = 60
 
 def ollama_available():
     try:
@@ -51,51 +54,118 @@ def ollama_models():
     except Exception:
         return []
 
-# ── GPIO via lgpio ────────────────────────────────────────────────────────────
-CHIP_AO   = 0
-CHIP_MAIN = 1
+# ── GPIO PIN MAP ──────────────────────────────────────────────────────────────
+# Verified with: lgpio info <phys_pin> gpiod
+# Format: (chip_index, line_number)
+PIN_DC_PWM  = (0,  6)   # phys 12 — chip 0 line 6  — supports tx_pwm
+PIN_DC_DIR1 = (1, 93)   # phys 16 — chip 1 line 93
+PIN_DC_DIR2 = (1, 94)   # phys 18 — chip 1 line 94
+PIN_SERVO   = (1, 85)   # phys 33 — chip 1 line 85 — bit-banged PWM
 
-LINE_SERVO   = (CHIP_AO,   10)
-LINE_DC_PWM  = (CHIP_MAIN, 116)
-LINE_DC_DIR1 = (CHIP_MAIN, 118)
-LINE_DC_DIR2 = (CHIP_MAIN, 119)
+SERVO_HZ      = 50          # 20 ms period
+DC_PWM_HZ     = 1000        # DC motor PWM frequency
 
-SERVO_MIN_PW = 500
-SERVO_MAX_PW = 2500
-SERVO_HZ     = 50
+GPIO_AVAILABLE = False
+_handles = {}       # chip_index → lgpio handle
+_servo_angle = 90   # shared state for servo thread
+_servo_lock  = threading.Lock()
+_servo_thread = None
+_servo_stop   = threading.Event()
 
 try:
     import lgpio
-    _h = {}
 
     def _chip(idx):
-        if idx not in _h:
-            _h[idx] = lgpio.gpiochip_open(idx)
-        return _h[idx]
+        if idx not in _handles:
+            _handles[idx] = lgpio.gpiochip_open(idx)
+        return _handles[idx]
 
-    lgpio.gpio_claim_output(_chip(LINE_SERVO[0]),   LINE_SERVO[1])
-    lgpio.gpio_claim_output(_chip(LINE_DC_PWM[0]),  LINE_DC_PWM[1])
-    lgpio.gpio_claim_output(_chip(LINE_DC_DIR1[0]), LINE_DC_DIR1[1])
-    lgpio.gpio_claim_output(_chip(LINE_DC_DIR2[0]), LINE_DC_DIR2[1])
+    # Claim all output lines
+    lgpio.gpio_claim_output(_chip(PIN_DC_PWM[0]),  PIN_DC_PWM[1])
+    lgpio.gpio_claim_output(_chip(PIN_DC_DIR1[0]), PIN_DC_DIR1[1])
+    lgpio.gpio_claim_output(_chip(PIN_DC_DIR2[0]), PIN_DC_DIR2[1])
+    lgpio.gpio_claim_output(_chip(PIN_SERVO[0]),   PIN_SERVO[1])
 
     GPIO_AVAILABLE = True
-    print("[GPIO] lgpio ready")
+    print("[GPIO] lgpio ready — chip0 line6 (DC PWM), chip1 lines 85/93/94")
 
 except Exception as e:
     print(f"[GPIO] Not available ({e}). Motor commands will be logged only.")
-    GPIO_AVAILABLE = False
 
-def _write(line_tuple, value):
+# ── SERVO BIT-BANG THREAD ────────────────────────────────────────────────────
+# tx_pwm doesn't work on gpiochip1 lines, so we drive the servo manually.
+# A standard servo wants a 50 Hz signal with 0.5–2.5 ms high pulse.
+
+SERVO_PERIOD  = 1.0 / SERVO_HZ          # 0.020 s
+SERVO_MIN_PW  = 0.0005                  # 500 µs  → 0°
+SERVO_MAX_PW  = 0.0025                  # 2500 µs → 180°
+
+def _servo_pw(angle_deg):
+    """Return pulse width in seconds for a given angle."""
+    angle_deg = max(0.0, min(180.0, float(angle_deg)))
+    return SERVO_MIN_PW + (angle_deg / 180.0) * (SERVO_MAX_PW - SERVO_MIN_PW)
+
+def _servo_loop():
+    """Background thread: continuously generates servo pulses."""
+    chip, line = PIN_SERVO
+    h = _chip(chip)
+    while not _servo_stop.is_set():
+        with _servo_lock:
+            angle = _servo_angle
+        pw = _servo_pw(angle)
+        low = SERVO_PERIOD - pw
+        lgpio.gpio_write(h, line, 1)
+        time.sleep(pw)
+        lgpio.gpio_write(h, line, 0)
+        time.sleep(low)
+
+def start_servo_thread():
+    global _servo_thread
     if not GPIO_AVAILABLE:
         return
-    chip, line = line_tuple
+    _servo_stop.clear()
+    _servo_thread = threading.Thread(target=_servo_loop, daemon=True)
+    _servo_thread.start()
+    print("[SERVO] Bit-bang thread started")
+
+def set_servo(angle_deg):
+    global _servo_angle
+    if not GPIO_AVAILABLE:
+        return
+    with _servo_lock:
+        _servo_angle = max(0.0, min(180.0, float(angle_deg)))
+
+# ── DC MOTOR ─────────────────────────────────────────────────────────────────
+
+def _write(pin_tuple, value):
+    if not GPIO_AVAILABLE:
+        return
+    chip, line = pin_tuple
     lgpio.gpio_write(_chip(chip), line, value)
 
-def _pwm(line_tuple, freq, duty_pct):
+def _pwm(pin_tuple, freq, duty_pct):
+    """Only call this for gpiochip0 pins."""
     if not GPIO_AVAILABLE:
         return
-    chip, line = line_tuple
+    chip, line = pin_tuple
     lgpio.tx_pwm(_chip(chip), line, freq, max(0.0, min(100.0, duty_pct)))
+
+def set_dc_motor(speed_pct, direction):
+    if not GPIO_AVAILABLE:
+        return
+    speed_pct = max(0.0, min(100.0, float(speed_pct)))
+    if direction == 'stop' or speed_pct == 0:
+        _pwm(PIN_DC_PWM, DC_PWM_HZ, 0)
+        _write(PIN_DC_DIR1, 0)
+        _write(PIN_DC_DIR2, 0)
+    elif direction == 'forward':
+        _write(PIN_DC_DIR1, 1)
+        _write(PIN_DC_DIR2, 0)
+        _pwm(PIN_DC_PWM, DC_PWM_HZ, speed_pct)
+    elif direction == 'backward':
+        _write(PIN_DC_DIR1, 0)
+        _write(PIN_DC_DIR2, 1)
+        _pwm(PIN_DC_PWM, DC_PWM_HZ, speed_pct)
 
 def setup_gpio():
     if not GPIO_AVAILABLE:
@@ -104,37 +174,25 @@ def setup_gpio():
     set_dc_motor(0, 'stop')
     print("[GPIO] Servo centred, DC motor stopped.")
 
-def set_servo(angle_deg):
-    if not GPIO_AVAILABLE:
-        return
-    angle_deg = max(0.0, min(180.0, float(angle_deg)))
-    pw_us = SERVO_MIN_PW + (angle_deg / 180.0) * (SERVO_MAX_PW - SERVO_MIN_PW)
-    duty  = (pw_us / 20_000.0) * 100.0
-    _pwm(LINE_SERVO, SERVO_HZ, duty)
-
-def set_dc_motor(speed_pct, direction):
-    if not GPIO_AVAILABLE:
-        return
-    speed_pct = max(0.0, min(100.0, float(speed_pct)))
-    if direction == 'stop' or speed_pct == 0:
-        _pwm(LINE_DC_PWM, 1000, 0)
-        _write(LINE_DC_DIR1, 0)
-        _write(LINE_DC_DIR2, 0)
-    elif direction == 'forward':
-        _write(LINE_DC_DIR1, 1)
-        _write(LINE_DC_DIR2, 0)
-        _pwm(LINE_DC_PWM, 1000, speed_pct)
-    elif direction == 'backward':
-        _write(LINE_DC_DIR1, 0)
-        _write(LINE_DC_DIR2, 1)
-        _pwm(LINE_DC_PWM, 1000, speed_pct)
-
 def apply_move_command(move):
     raw_dir = move.get('dir', 'stop').lower()
     speed   = float(move.get('speed', 0))
-    angle_map = {'forward': 90, 'backward': 90, 'left': 45, 'right': 135, 'stop': 90}
+
+    # Servo angle: left/right steer, forward/backward keep centre
+    angle_map = {
+        'forward':  90,
+        'backward': 90,
+        'left':     45,
+        'right':    135,
+        'stop':     90,
+    }
     servo_angle = angle_map.get(raw_dir, 90)
-    dc_dir = raw_dir if raw_dir in ('forward', 'backward', 'stop') else 'forward'
+
+    # DC motor direction
+    dc_dir = raw_dir if raw_dir in ('forward', 'backward') else 'stop'
+    if raw_dir in ('left', 'right'):
+        dc_dir = 'forward'   # still drive forward while turning
+
     set_servo(servo_angle)
     set_dc_motor(speed, dc_dir)
     print(f"[MOTOR] dir={raw_dir} speed={speed:.0f}% servo={servo_angle}°")
@@ -160,7 +218,6 @@ def append_memory(note):
     return entry
 
 # ── AI — OLLAMA ───────────────────────────────────────────────────────────────
-
 SYSTEM_PROMPT = """You are the mind of a small wheeled robot with a camera.
 Respond ONLY with a valid JSON object. No prose, no markdown, no explanation.
 Required keys:
@@ -170,21 +227,17 @@ Required keys:
 Rules: avoid obstacles, be curious, move slowly (20-40%) in new places, fast (60%+) only on clear paths."""
 
 def _extract_json(text):
-    """Pull the first {...} block out of a model response robustly."""
     text = text.strip()
-    # Try direct parse first
     try:
         return json.loads(text)
     except Exception:
         pass
-    # Strip markdown fences
     text = re.sub(r'^```[a-z]*\n?', '', text)
     text = re.sub(r'\n?```$', '', text)
     try:
         return json.loads(text.strip())
     except Exception:
         pass
-    # Find first {...} block
     m = re.search(r'\{.*\}', text, re.DOTALL)
     if m:
         try:
@@ -200,7 +253,6 @@ def query_local(image_b64, memory_context, cycle):
     models = ollama_models()
     mem_snippet = (memory_context or "").strip()[-1500:] or "(none)"
 
-    # ── Vision pass (moondream describes what it sees) ──────────────────────
     description = ""
     if image_b64 and VISION_MODEL.split(':')[0] in ' '.join(models):
         try:
@@ -219,7 +271,6 @@ def query_local(image_b64, memory_context, cycle):
     if not description:
         description = "(no camera image available)"
 
-    # ── Decision pass (llama3.2:3b decides what to do) ───────────────────────
     user_msg = (
         f"Cycle #{cycle}.\n"
         f"What the camera sees: {description}\n"
@@ -228,7 +279,6 @@ def query_local(image_b64, memory_context, cycle):
     )
 
     text_model = TEXT_MODEL
-    # Fallback: use whatever model is installed if preferred isn't available
     if text_model.split(':')[0] not in ' '.join(models) and models:
         text_model = models[0]
         print(f"[AI] {TEXT_MODEL} not found, using {text_model}")
@@ -238,7 +288,7 @@ def query_local(image_b64, memory_context, cycle):
         "system": SYSTEM_PROMPT,
         "prompt": user_msg,
         "stream": False,
-        "format": "json",   # Ollama JSON mode — forces valid JSON output
+        "format": "json",
     })
 
     if not tr.ok:
@@ -246,18 +296,14 @@ def query_local(image_b64, memory_context, cycle):
 
     raw = tr.json().get('response', '')
     result = _extract_json(raw)
-
-    # Ensure required keys exist
     result.setdefault('say', '')
     result.setdefault('move', {'dir': 'stop', 'speed': 0})
     result.setdefault('memo', '')
     result['move'].setdefault('dir', 'stop')
     result['move'].setdefault('speed', 0)
-
     return result
 
 def cleanup_memory_local(entries):
-    """Use the text model to deduplicate and clean the memory log."""
     if len(entries) < 5:
         return entries
 
@@ -292,7 +338,6 @@ def cleanup_memory_local(entries):
         cleaned = _extract_json(raw)
         if isinstance(cleaned, list):
             return cleaned
-        # Model may return {"entries": [...]}
         if isinstance(cleaned, dict):
             for v in cleaned.values():
                 if isinstance(v, list):
@@ -319,6 +364,12 @@ def status():
         "gpio": GPIO_AVAILABLE,
         "vision_model": VISION_MODEL,
         "text_model": TEXT_MODEL,
+        "pin_map": {
+            "servo":    f"chip{PIN_SERVO[0]} line{PIN_SERVO[1]} (bit-bang, phys33)",
+            "dc_pwm":   f"chip{PIN_DC_PWM[0]} line{PIN_DC_PWM[1]} (tx_pwm, phys12)",
+            "dc_dir1":  f"chip{PIN_DC_DIR1[0]} line{PIN_DC_DIR1[1]} (phys16)",
+            "dc_dir2":  f"chip{PIN_DC_DIR2[0]} line{PIN_DC_DIR2[1]} (phys18)",
+        }
     })
 
 @app.route('/api/think', methods=['POST'])
@@ -356,13 +407,14 @@ def cleanup_memory():
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     setup_gpio()
+    start_servo_thread()
 
     print(f"[AI] Checking Ollama... ", end='', flush=True)
     if ollama_available():
         models = ollama_models()
         print(f"OK — models: {models}")
         if not models:
-            print("[AI] WARNING: No models pulled yet.")
+            print(f"[AI] WARNING: No models pulled yet.")
             print(f"[AI] Run: ollama pull {TEXT_MODEL}")
             print(f"[AI] Run: ollama pull {VISION_MODEL}")
     else:
@@ -370,12 +422,11 @@ if __name__ == '__main__':
         print("[AI] Start Ollama with: ollama serve")
         print(f"[AI] Then pull models:  ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}")
 
-    cert = ('cert.pem', 'key.pem')
     if os.path.exists('cert.pem') and os.path.exists('key.pem'):
         print("[SERVER] HTTPS enabled — open https://<ip>:5000")
-        ssl_ctx = cert
+        ssl_ctx = ('cert.pem', 'key.pem')
     else:
-        print("[SERVER] No cert found — camera will not work.")
+        print("[SERVER] No cert found — camera will not work from remote browser.")
         print("[SERVER] Fix: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj '/CN=lepotato.local'")
         ssl_ctx = None
 
