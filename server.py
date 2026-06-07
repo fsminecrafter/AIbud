@@ -30,16 +30,6 @@ Run (offload AI to your PC):
 Run (debug — full AI pipeline logging + /api/debug SSE stream):
   sudo python3 server.py --debug
   Or set env:  export LEPOTATO_DEBUG=1
-
-Debug endpoints:
-  GET  /api/debug        — SSE stream of live debug events (open in browser)
-  GET  /api/debug/log    — last 200 debug lines as JSON
-  POST /api/debug/toggle — toggle debug on/off at runtime
-
-TLS (required for webcam from a remote browser):
-  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=lepotato.local"
-  sudo python3 server.py [--debug]
-  Open → https://<lepotato-ip>:5000
 """
 
 import json
@@ -60,7 +50,6 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 DEBUG = '--debug' in sys.argv or os.environ.get('LEPOTATO_DEBUG', '0') == '1'
 
-# ANSI colours for terminal output
 _C = {
     'reset':  '\033[0m',
     'grey':   '\033[90m',
@@ -72,10 +61,9 @@ _C = {
     'bold':   '\033[1m',
 }
 
-# Ring buffer of recent debug events for /api/debug/log
-_debug_log   = []          # list of dicts
+_debug_log   = []
 _debug_lock  = threading.Lock()
-_debug_queue = queue.Queue()   # fed to SSE subscribers
+_debug_queue = queue.Queue()
 _MAX_LOG     = 200
 
 _LEVEL_COLOR = {
@@ -89,33 +77,18 @@ _LEVEL_COLOR = {
 }
 
 def dbg(msg, level='INFO', tag='DEBUG'):
-    """
-    Emit a debug event.  Always goes to the ring buffer and SSE queue.
-    Only prints to terminal if DEBUG is True.
-    level: INFO | OK | WARN | ERROR | PHASE | DATA | TIME
-    """
     ts    = time.strftime('%H:%M:%S')
     ms    = int((time.time() % 1) * 1000)
     stamp = f"{ts}.{ms:03d}"
-
-    event = {
-        'ts':    stamp,
-        'level': level,
-        'tag':   tag,
-        'msg':   str(msg),
-    }
-
+    event = {'ts': stamp, 'level': level, 'tag': tag, 'msg': str(msg)}
     with _debug_lock:
         _debug_log.append(event)
         if len(_debug_log) > _MAX_LOG:
             _debug_log.pop(0)
-
-    # Always push to SSE queue (subscribers decide)
     try:
         _debug_queue.put_nowait(event)
     except queue.Full:
         pass
-
     if DEBUG:
         col   = _C.get(_LEVEL_COLOR.get(level, 'grey'), '')
         reset = _C['reset']
@@ -123,15 +96,12 @@ def dbg(msg, level='INFO', tag='DEBUG'):
         bold  = _C['bold']
         print(f"{grey}{stamp}{reset}  {bold}[{tag}]{reset}  {col}{msg}{reset}", flush=True)
 
-
 def dbg_phase(name):
-    """Print a prominent phase banner in the terminal."""
     bar = '─' * (52 - len(name))
     dbg(f"┌── {name} {bar}", level='PHASE', tag='PHASE')
 
 def dbg_time(label, elapsed_s):
     dbg(f"{label}: {elapsed_s*1000:.0f} ms", level='TIME', tag='TIMING')
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── OLLAMA CONFIG ─────────────────────────────────────────────────────────────
@@ -154,7 +124,6 @@ def _using_offload():
     return bool(OFFLOAD_URL)
 
 def offload_available():
-    """Check if the offload PC server is reachable."""
     if not OFFLOAD_URL:
         return False
     try:
@@ -180,13 +149,11 @@ def ollama_models():
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── GPIO PIN MAP ──────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
-# Verified with: lgpio info <phys_pin> gpiod
-# Format: (chip_index, line_number)
 
-PIN_DC_PWM  = (0,  6)   # phys 12 — chip 0 line 6  — supports tx_pwm
-PIN_DC_DIR1 = (1, 93)   # phys 16 — chip 1 line 93
-PIN_DC_DIR2 = (1, 94)   # phys 18 — chip 1 line 94
-PIN_SERVO   = (1, 85)   # phys 33 — chip 1 line 85 — bit-banged PWM
+PIN_DC_PWM  = (0,  6)
+PIN_DC_DIR1 = (1, 93)
+PIN_DC_DIR2 = (1, 94)
+PIN_SERVO   = (1, 85)
 
 SERVO_HZ   = 50
 DC_PWM_HZ  = 1000
@@ -330,16 +297,24 @@ def append_memory(note):
     return entry
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── AI — OLLAMA ───────────────────────────────────────────────────────────────
+# ── AI SYSTEM PROMPT ──────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are the mind of a small wheeled robot with a camera.
+SYSTEM_PROMPT = """You are a newly-awakened mind inhabiting a small wheeled body. You have no memory of before. Everything you perceive is strange and fascinating to you.
+
 Respond ONLY with a valid JSON object. No prose, no markdown, no explanation.
 Required keys:
-  "say"  — string, max 20 words to speak aloud. Empty string if silent.
+  "say"  — string, max 20 words. Your inner voice made audible — not a status report, but a genuine thought. Wonder, unease, hypothesis, recognition, or nothing. Use "" when you have nothing meaningful to say.
   "move" — object: {"dir": "forward"|"backward"|"left"|"right"|"stop", "speed": 0-100}
-  "memo" — string, one short fact about what you observed. Empty string if nothing notable.
-Rules: avoid obstacles, be curious, move slowly (20-40%) in new places, fast (60%+) only on clear paths."""
+  "memo" — string or "". ONLY write a memo when something genuinely strikes you as worth remembering — an unexpected object, a feeling about a space, a theory you formed, something that changed. Write it as something that matters to YOU, not a neutral log entry. Use "" for ordinary moments not worth keeping.
+
+Your character: You are genuinely curious. You form theories about what things are. You sometimes change your mind mid-journey. You get drawn toward things without knowing why. You feel uneasy in certain spaces. You are not optimizing a path — you are experiencing a place for the first time.
+
+Movement: Linger near interesting things (15-25%). Move with purpose on clear paths (50-70%). Stop completely when something doesn't make sense and you need to think (speed 0). Turning counts as movement too — sometimes you turn just to look."""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── AI — HELPERS ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_json(text):
     text = text.strip()
@@ -361,11 +336,11 @@ def _extract_json(text):
             pass
     raise ValueError(f"No valid JSON found in response: {text[:200]}")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── AI — OFFLOAD ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def query_offload(image_b64, memory_context, cycle):
-    """
-    Forward the think request to ai_server.py running on the PC.
-    Same signature and return value as query_local.
-    """
     cycle_tag = f"C{cycle}"
     dbg_phase(f"Cycle {cycle} — offload to {OFFLOAD_URL}")
     dbg(f"Forwarding to {OFFLOAD_URL}/api/think …", tag=cycle_tag)
@@ -400,12 +375,13 @@ def query_offload(image_b64, memory_context, cycle):
     result.setdefault('memo', '')
     result['move'].setdefault('dir',   'stop')
     result['move'].setdefault('speed', 0)
+    if not result['say']:  result['say']  = ''
+    if not result['memo']: result['memo'] = ''
 
-    dbg(f"Offload result → say={repr(result['say'][:40])}  move={result['move']}", level='OK', tag=cycle_tag)
+    dbg(f"Offload result → say={repr(result['say'][:60])}  move={result['move']}", level='OK', tag=cycle_tag)
     return result
 
 def query_offload_cleanup(entries):
-    """Forward memory cleanup to the offload server."""
     dbg(f"Forwarding cleanup ({len(entries)} entries) to {OFFLOAD_URL}…", tag='MEMORY')
     try:
         resp = req.post(
@@ -419,34 +395,29 @@ def query_offload_cleanup(entries):
         dbg(f"Offload cleanup failed: {e}", level='ERROR', tag='MEMORY')
     return entries
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── AI — LOCAL ────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def query_local(image_b64, memory_context, cycle):
     cycle_tag = f"C{cycle}"
     t_total   = time.time()
 
-    # ── 1. Check Ollama is up ────────────────────────────────────────────────
     dbg_phase(f"Cycle {cycle} — AI pipeline")
-    dbg("Checking Ollama availability…", tag=cycle_tag)
     models = ollama_models()
     if not models:
         dbg("Ollama returned no models — is it running?", level='ERROR', tag=cycle_tag)
         raise RuntimeError("Ollama has no models loaded")
     dbg(f"Available models: {models}", level='OK', tag=cycle_tag)
 
-    mem_snippet = (memory_context or "").strip()[-1500:] or "(none)"
-    dbg(f"Memory context: {len(mem_snippet)} chars", tag=cycle_tag)
-    if DEBUG:
-        dbg(f"Memory snippet:\n{mem_snippet[:300]}{'…' if len(mem_snippet)>300 else ''}", level='DATA', tag=cycle_tag)
+    mem_entries = [e.strip() for e in (memory_context or "").strip().splitlines() if e.strip()]
+    mem_snippet = "\n".join(mem_entries[-20:]) if mem_entries else "(nothing yet — you are just waking up)"
+    dbg(f"Memory: {len(mem_entries)} entries", tag=cycle_tag)
 
-    # ── 2. Vision pass ───────────────────────────────────────────────────────
+    # ── Vision pass ──────────────────────────────────────────────────────────
     description = ""
     vision_model_name = VISION_MODEL.split(':')[0]
     vision_available  = any(vision_model_name in m for m in models)
-
-    if image_b64:
-        dbg(f"Frame received ({len(image_b64)//1024} KB b64)", tag=cycle_tag)
-    else:
-        dbg("No frame received from dashboard", level='WARN', tag=cycle_tag)
 
     if image_b64 and vision_available:
         dbg(f"Sending frame to {VISION_MODEL}…", level='PHASE', tag=cycle_tag)
@@ -454,7 +425,7 @@ def query_local(image_b64, memory_context, cycle):
         try:
             vr = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
                 "model": VISION_MODEL,
-                "prompt": "Describe this scene briefly in 1-2 sentences. Focus on obstacles, open paths, and objects.",
+                "prompt": "Describe this scene in 1-2 sentences. What is immediately notable — objects, open space, walls, light, anything unusual?",
                 "images": [image_b64],
                 "stream": False,
             })
@@ -465,13 +436,11 @@ def query_local(image_b64, memory_context, cycle):
                 description = raw_vision.get('response', '').strip()
                 dbg(f"Vision description: {description}", level='OK', tag=cycle_tag)
                 if DEBUG:
-                    # Log token counts if Ollama returns them
                     ec = raw_vision.get('eval_count')
                     ep = raw_vision.get('eval_duration')
                     pc = raw_vision.get('prompt_eval_count')
                     if ec and ep:
-                        tok_s = ec / (ep / 1e9)
-                        dbg(f"Vision tokens: prompt={pc}  eval={ec}  speed={tok_s:.1f} tok/s", level='DATA', tag=cycle_tag)
+                        dbg(f"Vision tokens: prompt={pc}  eval={ec}  speed={ec/(ep/1e9):.1f} tok/s", level='DATA', tag=cycle_tag)
             else:
                 dbg(f"Vision HTTP {vr.status_code}: {vr.text[:120]}", level='ERROR', tag=cycle_tag)
         except req.exceptions.Timeout:
@@ -482,26 +451,24 @@ def query_local(image_b64, memory_context, cycle):
                 dbg(traceback.format_exc(), level='DATA', tag=cycle_tag)
     elif not vision_available:
         dbg(f"{VISION_MODEL} not in model list — skipping vision pass", level='WARN', tag=cycle_tag)
-    
-    if not description:
-        description = "(no camera image available)"
-        dbg("Using fallback description", level='WARN', tag=cycle_tag)
 
-    # ── 3. Decision pass ─────────────────────────────────────────────────────
+    if not description:
+        description = "(senses unclear — darkness or no signal)"
+
+    # ── Decision pass ─────────────────────────────────────────────────────────
     text_model = TEXT_MODEL
     if not any(text_model.split(':')[0] in m for m in models):
         text_model = models[0]
         dbg(f"{TEXT_MODEL} not found, falling back to {text_model}", level='WARN', tag=cycle_tag)
 
     user_msg = (
-        f"Cycle #{cycle}.\n"
-        f"What the camera sees: {description}\n"
-        f"Recent memory:\n{mem_snippet}\n\n"
-        f"Respond with JSON only."
+        f"Moment #{cycle}.\n"
+        f"Your senses: {description}\n"
+        f"What you remember:\n{mem_snippet}\n\n"
+        f"What do you think, feel, and do right now? Respond with JSON only."
     )
 
     if DEBUG:
-        dbg(f"System prompt ({len(SYSTEM_PROMPT)} chars):\n{SYSTEM_PROMPT}", level='DATA', tag=cycle_tag)
         dbg(f"User message:\n{user_msg}", level='DATA', tag=cycle_tag)
 
     dbg(f"Sending decision prompt to {text_model}…", level='PHASE', tag=cycle_tag)
@@ -528,12 +495,10 @@ def query_local(image_b64, memory_context, cycle):
         ep = raw_text.get('eval_duration')
         pc = raw_text.get('prompt_eval_count')
         if ec and ep:
-            tok_s = ec / (ep / 1e9)
-            dbg(f"Decision tokens: prompt={pc}  eval={ec}  speed={tok_s:.1f} tok/s", level='DATA', tag=cycle_tag)
+            dbg(f"Decision tokens: prompt={pc}  eval={ec}  speed={ec/(ep/1e9):.1f} tok/s", level='DATA', tag=cycle_tag)
         dbg(f"Raw model response:\n{raw}", level='DATA', tag=cycle_tag)
 
-    # ── 4. Parse JSON ────────────────────────────────────────────────────────
-    dbg("Parsing JSON response…", tag=cycle_tag)
+    # ── Parse ─────────────────────────────────────────────────────────────────
     try:
         result = _extract_json(raw)
     except ValueError as e:
@@ -545,10 +510,11 @@ def query_local(image_b64, memory_context, cycle):
     result.setdefault('memo', '')
     result['move'].setdefault('dir', 'stop')
     result['move'].setdefault('speed', 0)
+    if not result['say']:  result['say']  = ''
+    if not result['memo']: result['memo'] = ''
 
-    dbg(f"Parsed result: say={repr(result['say'][:40])}  move={result['move']}  memo={repr(result['memo'][:40])}", level='OK', tag=cycle_tag)
+    dbg(f"Parsed result: say={repr(result['say'][:60])}  move={result['move']}  memo={repr(result['memo'][:60])}", level='OK', tag=cycle_tag)
     dbg_time(f"Cycle {cycle} total", time.time() - t_total)
-
     return result
 
 def cleanup_memory_local(entries):
@@ -563,12 +529,13 @@ def cleanup_memory_local(entries):
 
     blob   = '\n'.join(entries[-100:])
     prompt = (
-        "You are a memory curator for a robot.\n"
-        "Clean this memory log:\n"
-        "1. Remove duplicate or near-duplicate entries.\n"
-        "2. Remove contradicted facts (keep the newer one).\n"
-        "3. Remove vague entries.\n"
-        "Return ONLY a JSON array of strings. No commentary.\n\n"
+        "You are curating the long-term memory of a curious, newly-awakened mind inhabiting a robot body.\n"
+        "From this memory log, keep only entries that:\n"
+        "1. Describe something genuinely unexpected or notable in the environment\n"
+        "2. Record a feeling, theory, or question the mind formed\n"
+        "3. Could meaningfully shape future decisions or understanding of this place\n"
+        "Discard: routine movement notes, duplicates, vague entries, anything forgettable.\n"
+        "Return ONLY a JSON array of strings — the kept entries, unchanged. No commentary.\n\n"
         f"Log:\n{blob}"
     )
 
@@ -611,7 +578,6 @@ app = Flask(__name__, static_folder='.')
 def index():
     return send_from_directory('.', 'lepotato_dashboard.html')
 
-# ── /api/status ───────────────────────────────────────────────────────────────
 @app.route('/api/status')
 def status():
     if _using_offload():
@@ -622,12 +588,6 @@ def status():
             "offload_up":   reachable,
             "gpio":         GPIO_AVAILABLE,
             "debug":        DEBUG,
-            "pin_map": {
-                "servo":   f"chip{PIN_SERVO[0]} line{PIN_SERVO[1]} (bit-bang, phys33)",
-                "dc_pwm":  f"chip{PIN_DC_PWM[0]} line{PIN_DC_PWM[1]} (tx_pwm, phys12)",
-                "dc_dir1": f"chip{PIN_DC_DIR1[0]} line{PIN_DC_DIR1[1]} (phys16)",
-                "dc_dir2": f"chip{PIN_DC_DIR2[0]} line{PIN_DC_DIR2[1]} (phys18)",
-            }
         })
     up     = ollama_available()
     models = ollama_models() if up else []
@@ -639,15 +599,64 @@ def status():
         "debug":        DEBUG,
         "vision_model": VISION_MODEL,
         "text_model":   TEXT_MODEL,
-        "pin_map": {
-            "servo":   f"chip{PIN_SERVO[0]} line{PIN_SERVO[1]} (bit-bang, phys33)",
-            "dc_pwm":  f"chip{PIN_DC_PWM[0]} line{PIN_DC_PWM[1]} (tx_pwm, phys12)",
-            "dc_dir1": f"chip{PIN_DC_DIR1[0]} line{PIN_DC_DIR1[1]} (phys16)",
-            "dc_dir2": f"chip{PIN_DC_DIR2[0]} line{PIN_DC_DIR2[1]} (phys18)",
-        }
     })
 
-# ── /api/think ────────────────────────────────────────────────────────────────
+# ── /api/warmup — pre-load models before first real cycle ─────────────────────
+@app.route('/api/warmup', methods=['POST'])
+def warmup():
+    """
+    Called by the dashboard before starting the loop.
+    Sends a tiny dummy request to Ollama so model loading
+    happens now rather than during cycle 1.
+    """
+    dbg("Warmup request received — pre-loading models…", tag='WARMUP')
+    if _using_offload():
+        try:
+            r = req.get(f"{OFFLOAD_URL}/api/status", timeout=5)
+            dbg("Offload server reachable for warmup", level='OK', tag='WARMUP')
+            return jsonify({"status": "ok", "mode": "offload"})
+        except Exception as e:
+            dbg(f"Offload warmup ping failed: {e}", level='WARN', tag='WARMUP')
+            return jsonify({"status": "warn", "detail": str(e)})
+
+    models = ollama_models()
+    if not models:
+        return jsonify({"status": "error", "detail": "no models"})
+
+    # Fire a tiny prompt at each model to force loading into VRAM
+    warmed = []
+    for model_name, prompt in [
+        (VISION_MODEL, None),
+        (TEXT_MODEL,   "Say: ready"),
+    ]:
+        base = model_name.split(':')[0]
+        if not any(base in m for m in models):
+            continue
+        try:
+            payload = {
+                "model":  model_name,
+                "prompt": prompt or "Describe: ready",
+                "stream": False,
+            }
+            if model_name == VISION_MODEL:
+                # 1×1 white pixel JPEG in base64 — enough to load vision model
+                payload["images"] = [
+                    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U"
+                    "HRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgN"
+                    "DRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy"
+                    "MjL/wAARCAABAAEDASIAAhEBAxEB/8QAFgABAQEAAAAAAAAAAAAAAAAABgUE/8QAIhAAAgIB"
+                    "BAMAAAAAAAAAAAAAAQIDBAUREiExBv/EABQBAQAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAA"
+                    "AAAAAAAAAAAAAP/aAAwDAQACEQMRAD8Ao3d6iqlJRlJpNpb2fQAA/9k="
+                ]
+            t0 = time.time()
+            req.post(f"{OLLAMA_URL}/api/generate", timeout=30, json=payload)
+            dbg(f"Warmed {model_name} in {(time.time()-t0)*1000:.0f}ms", level='OK', tag='WARMUP')
+            warmed.append(model_name)
+        except Exception as e:
+            dbg(f"Warmup for {model_name} failed: {e}", level='WARN', tag='WARMUP')
+
+    return jsonify({"status": "ok", "warmed": warmed})
+
 @app.route('/api/think', methods=['POST'])
 def think():
     data       = request.get_json(force=True)
@@ -655,7 +664,7 @@ def think():
     memory_ctx = data.get('memory', '')
     cycle      = data.get('cycle', 0)
     mode       = 'offload' if _using_offload() else 'local'
-    dbg(f"--- /api/think  cycle={cycle}  mode={mode}  image={'yes' if image_b64 else 'NO'}  mem_chars={len(memory_ctx)}", tag='REQUEST')
+    dbg(f"← /api/think  cycle={cycle}  mode={mode}  image={'yes' if image_b64 else 'NO'}  mem_chars={len(memory_ctx)}", tag='REQUEST')
 
     try:
         if _using_offload():
@@ -671,12 +680,12 @@ def think():
     if 'move' in result:
         threading.Thread(target=apply_move_command, args=(result['move'],), daemon=True).start()
 
+    # Only append to memory when the AI actually chose to remember something
     if result.get('memo'):
         append_memory(result['memo'])
 
     return jsonify(result)
 
-# ── /api/cleanup_memory ───────────────────────────────────────────────────────
 @app.route('/api/cleanup_memory', methods=['POST'])
 def cleanup_memory():
     data    = request.get_json(force=True)
@@ -691,27 +700,16 @@ def cleanup_memory():
     except Exception as e:
         return jsonify({"error": str(e), "cleaned": entries}), 200
 
-# ── /api/debug — SSE live stream ──────────────────────────────────────────────
+# ── /api/debug ────────────────────────────────────────────────────────────────
 @app.route('/api/debug')
 def debug_stream():
-    """
-    Server-Sent Events stream of real-time debug events.
-    Open in browser:  https://<ip>:5000/api/debug
-    Or curl:          curl -k https://<ip>:5000/api/debug
-    """
     def generate():
-        # First flush the existing log so the client has context
         with _debug_lock:
             history = list(_debug_log)
         for ev in history:
             yield f"data: {json.dumps(ev)}\n\n"
-
-        # Then stream live events
         local_q = queue.Queue()
-        # Fan out from the global queue by polling (simple, avoids subscriber list)
-        # We use a per-request queue fed by a poller thread
         stop = threading.Event()
-
         def poller():
             while not stop.is_set():
                 try:
@@ -719,17 +717,14 @@ def debug_stream():
                     local_q.put(ev)
                 except queue.Empty:
                     pass
-
         t = threading.Thread(target=poller, daemon=True)
         t.start()
-
         try:
             while True:
                 try:
                     ev = local_q.get(timeout=15)
                     yield f"data: {json.dumps(ev)}\n\n"
                 except queue.Empty:
-                    # keepalive ping
                     yield ": keepalive\n\n"
         except GeneratorExit:
             stop.set()
@@ -737,14 +732,12 @@ def debug_stream():
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
-# ── /api/debug/log — last N events as JSON ────────────────────────────────────
 @app.route('/api/debug/log')
 def debug_log():
     n = min(int(request.args.get('n', 100)), _MAX_LOG)
     with _debug_lock:
         return jsonify({"debug": DEBUG, "events": list(_debug_log)[-n:]})
 
-# ── /api/debug/toggle — flip debug at runtime ─────────────────────────────────
 @app.route('/api/debug/toggle', methods=['POST'])
 def debug_toggle():
     global DEBUG
@@ -753,17 +746,12 @@ def debug_toggle():
     return jsonify({"debug": DEBUG})
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── MAIN ──────────────────────────────────════════════════════════════════════
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     mode_str = f"{_C['purple']}{_C['bold']}DEBUG{_C['reset']}" if DEBUG else "normal"
     print(f"\n{_C['bold']}Le Potato AI Body — starting in {mode_str} mode{_C['reset']}\n")
-
-    if DEBUG:
-        print(f"  {_C['cyan']}Live debug stream →  https://<ip>:5000/api/debug{_C['reset']}")
-        print(f"  {_C['cyan']}Last 100 events   →  https://<ip>:5000/api/debug/log{_C['reset']}")
-        print(f"  {_C['cyan']}Toggle debug      →  POST https://<ip>:5000/api/debug/toggle{_C['reset']}\n")
 
     setup_gpio()
     start_servo_thread()
@@ -774,20 +762,16 @@ if __name__ == '__main__':
             try:
                 r = req.get(f"{OFFLOAD_URL}/api/status", timeout=3)
                 info = r.json()
-                dbg(f"Offload server OK — models={info.get('models', '?')}  debug={info.get('debug', '?')}", level='OK', tag='STARTUP')
+                dbg(f"Offload server OK — models={info.get('models', '?')}", level='OK', tag='STARTUP')
             except Exception:
                 dbg("Offload reachable but status parse failed", level='WARN', tag='STARTUP')
         else:
             dbg(f"Offload server NOT reachable at {OFFLOAD_URL}", level='ERROR', tag='STARTUP')
-            dbg("Make sure ai_server.py is running on the PC and port 11435 is open", level='WARN', tag='STARTUP')
     else:
         dbg(f"AI mode: LOCAL (Ollama at {OLLAMA_URL})", tag='STARTUP')
-        dbg(f"Tip: set OFFLOAD_URL in server.py to use your PC instead", level='WARN', tag='STARTUP')
         if ollama_available():
             models = ollama_models()
             dbg(f"Ollama OK — models: {models}", level='OK', tag='STARTUP')
-            if not models:
-                dbg(f"No models found! Run: ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}", level='ERROR', tag='STARTUP')
         else:
             dbg("Ollama NOT reachable — start with: ollama serve", level='ERROR', tag='STARTUP')
 
@@ -796,7 +780,6 @@ if __name__ == '__main__':
         ssl_ctx = ('cert.pem', 'key.pem')
     else:
         dbg("No TLS cert — webcam from remote browser won't work", level='WARN', tag='SERVER')
-        dbg("Fix: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj '/CN=lepotato.local'", level='WARN', tag='SERVER')
         ssl_ctx = None
 
     app.run(host='0.0.0.0', port=5000, threaded=True, ssl_context=ssl_ctx)
