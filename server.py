@@ -4,96 +4,146 @@ Le Potato AI Body — backend server
 Ubuntu 22.04 LTS target (AML-S905X-CC / Le Potato)
 
 Install deps:
-  pip3 install flask anthropic pigpio pillow --break-system-packages
+  pip3 install flask anthropic lgpio pillow --break-system-packages
+  sudo apt install -y gpiod openssl
 
 GPIO wiring (Le Potato AML-S905X-CC 40-pin header):
-  Servo signal  → pin 33 (GPIO AO_10)
-  DC motor PWM  → pin 12 (GPIO_18)
-  DC motor dir1 → pin 16 (GPIO_23)
-  DC motor dir2 → pin 18 (GPIO_24)
+  Servo signal  → physical pin 33  (gpiochip0 line 10  — AO_10)
+  DC motor PWM  → physical pin 12  (gpiochip1 line 116 — GPIOX_12)
+  DC motor dir1 → physical pin 16  (gpiochip1 line 118 — GPIOX_14? run gpioinfo to confirm)
+  DC motor dir2 → physical pin 18  (gpiochip1 line 119)
   GND           → pins 6, 9, 14...
 
 Run:
+  # Generate self-signed cert once (required for HTTPS / camera access):
+  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=lepotato.local"
+
+  export ANTHROPIC_API_KEY=sk-ant-...
   python3 server.py
-  Open browser → http://<lepotato-ip>:5000
+  Open browser → https://<lepotato-ip>:5000  (accept the cert warning)
+
+To find your GPIO line numbers:
+  sudo apt install gpiod
+  gpiodetect           # lists gpiochip0, gpiochip1...
+  gpioinfo gpiochip1   # shows line numbers and current names
 """
 
-import base64
 import json
 import os
 import time
 import threading
-from io import BytesIO
 
 from flask import Flask, request, jsonify, send_from_directory
 import anthropic
 
-# ── GPIO (comment out if testing without hardware) ───────────────────────────
+# ── GPIO via lgpio (no daemon needed, works on AML-S905X-CC) ─────────────────
+#
+# lgpio addresses GPIO lines as (chip_handle, line_offset).
+# Run `gpioinfo gpiochip0` and `gpioinfo gpiochip1` to find your line offsets.
+# The values below are best-guess for Le Potato — VERIFY with gpioinfo first.
+#
+# Physical pin → chip/line mapping (AML-S905X-CC):
+#   pin 33 → gpiochip0 line 10   (AO domain)
+#   pin 12 → gpiochip1 line 116  (GPIOX_12)
+#   pin 16 → gpiochip1 line 118  (GPIOX_14 — double-check)
+#   pin 18 → gpiochip1 line 119  (GPIOX_15 — double-check)
+
+CHIP_AO   = 0   # gpiochip0 — AO (always-on) domain — pin 33 lives here
+CHIP_MAIN = 1   # gpiochip1 — main GPIO bank
+
+LINE_SERVO    = (CHIP_AO,   10)   # physical pin 33
+LINE_DC_PWM   = (CHIP_MAIN, 116)  # physical pin 12
+LINE_DC_DIR1  = (CHIP_MAIN, 118)  # physical pin 16
+LINE_DC_DIR2  = (CHIP_MAIN, 119)  # physical pin 18
+
+SERVO_MIN_PW  = 500    # microseconds — hard left  (~0°)
+SERVO_MAX_PW  = 2500   # microseconds — hard right (~180°)
+SERVO_CENTER  = 1500   # microseconds — center     (90°)
+SERVO_HZ      = 50     # standard servo PWM frequency
+
 try:
-    import pigpio
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise RuntimeError("pigpio daemon not running — start with: sudo pigpiod")
+    import lgpio
+    _h = {}  # chip_index → handle
+
+    def _chip(idx):
+        if idx not in _h:
+            _h[idx] = lgpio.gpiochip_open(idx)
+        return _h[idx]
+
+    # Claim all lines as outputs
+    lgpio.gpio_claim_output(_chip(LINE_SERVO[0]),   LINE_SERVO[1])
+    lgpio.gpio_claim_output(_chip(LINE_DC_PWM[0]),  LINE_DC_PWM[1])
+    lgpio.gpio_claim_output(_chip(LINE_DC_DIR1[0]), LINE_DC_DIR1[1])
+    lgpio.gpio_claim_output(_chip(LINE_DC_DIR2[0]), LINE_DC_DIR2[1])
+
     GPIO_AVAILABLE = True
-    print("[GPIO] pigpio connected")
+    print("[GPIO] lgpio ready")
+
 except Exception as e:
     print(f"[GPIO] Not available ({e}). Motor commands will be logged only.")
-    pi = None
     GPIO_AVAILABLE = False
 
-# Pin assignments (BCM numbering via pigpio)
-PIN_SERVO     = 33   # Servo PWM signal
-PIN_DC_PWM    = 12   # DC motor speed (PWM)
-PIN_DC_DIR1   = 16   # DC motor direction A
-PIN_DC_DIR2   = 18   # DC motor direction B
+# ── SOFTWARE PWM HELPERS ─────────────────────────────────────────────────────
+# lgpio provides tx_pwm for hardware-assisted PWM on supported lines,
+# and gpio_write for simple digital output.
 
-SERVO_MIN_PW  = 500   # microseconds — hard left (~0°)
-SERVO_MAX_PW  = 2500  # microseconds — hard right (~180°)
-SERVO_CENTER  = 1500  # microseconds — center (90°)
+def _write(line_tuple, value: int):
+    if not GPIO_AVAILABLE:
+        return
+    chip, line = line_tuple
+    lgpio.gpio_write(_chip(chip), line, value)
+
+def _pwm(line_tuple, freq: int, duty_pct: float):
+    """Software PWM via lgpio tx_pwm. duty_pct: 0.0–100.0"""
+    if not GPIO_AVAILABLE:
+        return
+    chip, line = line_tuple
+    if duty_pct <= 0:
+        lgpio.tx_pwm(_chip(chip), line, freq, 0)
+    else:
+        lgpio.tx_pwm(_chip(chip), line, freq, max(0.0, min(100.0, duty_pct)))
 
 def setup_gpio():
     if not GPIO_AVAILABLE:
         return
-    pi.set_mode(PIN_SERVO, pigpio.OUTPUT)
-    pi.set_mode(PIN_DC_PWM, pigpio.OUTPUT)
-    pi.set_mode(PIN_DC_DIR1, pigpio.OUTPUT)
-    pi.set_mode(PIN_DC_DIR2, pigpio.OUTPUT)
-    pi.set_servo_pulsewidth(PIN_SERVO, SERVO_CENTER)
+    # Centre servo on startup
+    set_servo(90)
+    set_dc_motor(0, 'stop')
+    print("[GPIO] Servo centred, DC motor stopped.")
 
 def set_servo(angle_deg: float):
-    """angle_deg: 0–180. 90 = center / straight ahead."""
+    """angle_deg: 0–180. 90 = straight ahead."""
     if not GPIO_AVAILABLE:
         return
-    angle_deg = max(0, min(180, angle_deg))
-    pw = int(SERVO_MIN_PW + (angle_deg / 180.0) * (SERVO_MAX_PW - SERVO_MIN_PW))
-    pi.set_servo_pulsewidth(PIN_SERVO, pw)
+    angle_deg = max(0.0, min(180.0, angle_deg))
+    pw_us = SERVO_MIN_PW + (angle_deg / 180.0) * (SERVO_MAX_PW - SERVO_MIN_PW)
+    # Convert pulse width to duty cycle at 50 Hz (period = 20 000 µs)
+    duty = (pw_us / 20_000.0) * 100.0
+    _pwm(LINE_SERVO, SERVO_HZ, duty)
 
 def set_dc_motor(speed_pct: float, direction: str):
     """speed_pct: 0–100. direction: 'forward' | 'backward' | 'stop'."""
     if not GPIO_AVAILABLE:
         return
-    speed_pct = max(0, min(100, speed_pct))
-    duty = int(speed_pct / 100.0 * 255)
+    speed_pct = max(0.0, min(100.0, speed_pct))
 
     if direction == 'stop' or speed_pct == 0:
-        pi.set_PWM_dutycycle(PIN_DC_PWM, 0)
-        pi.write(PIN_DC_DIR1, 0)
-        pi.write(PIN_DC_DIR2, 0)
+        _pwm(LINE_DC_PWM, 1000, 0)
+        _write(LINE_DC_DIR1, 0)
+        _write(LINE_DC_DIR2, 0)
     elif direction == 'forward':
-        pi.write(PIN_DC_DIR1, 1)
-        pi.write(PIN_DC_DIR2, 0)
-        pi.set_PWM_dutycycle(PIN_DC_PWM, duty)
+        _write(LINE_DC_DIR1, 1)
+        _write(LINE_DC_DIR2, 0)
+        _pwm(LINE_DC_PWM, 1000, speed_pct)
     elif direction == 'backward':
-        pi.write(PIN_DC_DIR1, 0)
-        pi.write(PIN_DC_DIR2, 1)
-        pi.set_PWM_dutycycle(PIN_DC_PWM, duty)
+        _write(LINE_DC_DIR1, 0)
+        _write(LINE_DC_DIR2, 1)
+        _pwm(LINE_DC_PWM, 1000, speed_pct)
 
 def apply_move_command(move: dict):
-    """Apply a move dict from the AI JSON response to the hardware."""
-    raw_dir   = move.get('dir', 'stop').lower()
-    speed     = float(move.get('speed', 0))
+    raw_dir = move.get('dir', 'stop').lower()
+    speed   = float(move.get('speed', 0))
 
-    # Map direction to servo angle + DC motor
     angle_map = {
         'forward':  90,
         'backward': 90,
@@ -102,24 +152,22 @@ def apply_move_command(move: dict):
         'stop':     90,
     }
     servo_angle = angle_map.get(raw_dir, 90)
-    dc_dir = raw_dir if raw_dir in ('forward', 'backward', 'stop') else 'stop'
-    if raw_dir in ('left', 'right'):
-        dc_dir = 'forward'  # turn while driving forward
+    dc_dir = raw_dir if raw_dir in ('forward', 'backward', 'stop') else 'forward'
 
     set_servo(servo_angle)
     set_dc_motor(speed, dc_dir)
-    print(f"[MOTOR] dir={raw_dir} speed={speed}% servo={servo_angle}°")
+    print(f"[MOTOR] dir={raw_dir} speed={speed:.0f}% servo={servo_angle}°")
 
 # ── MEMORY ───────────────────────────────────────────────────────────────────
 MEMORY_PATH = os.path.join(os.path.dirname(__file__), 'memory.log')
 
-def load_memory() -> list[str]:
+def load_memory() -> list:
     if not os.path.exists(MEMORY_PATH):
         return []
     with open(MEMORY_PATH, 'r') as f:
         return [l.strip() for l in f if l.strip()]
 
-def save_memory(entries: list[str]):
+def save_memory(entries: list):
     with open(MEMORY_PATH, 'w') as f:
         f.write('\n'.join(entries) + '\n')
 
@@ -131,7 +179,7 @@ def append_memory(note: str):
     return entry
 
 # ── ANTHROPIC CLIENT ─────────────────────────────────────────────────────────
-client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+client = anthropic.Anthropic()
 
 SYSTEM_PROMPT = """You are the mind of a small wheeled robot with a camera.
 You perceive the world through a camera image and a short memory log.
@@ -148,7 +196,7 @@ Rules:
 - Use memory to avoid repeating mistakes.
 - Keep 'say' natural and expressive — you have a personality."""
 
-def query_claude(image_b64: str | None, memory_context: str, cycle: int) -> dict:
+def query_claude(image_b64, memory_context: str, cycle: int) -> dict:
     content = []
 
     if image_b64:
@@ -175,7 +223,6 @@ def query_claude(image_b64: str | None, memory_context: str, cycle: int) -> dict
     )
 
     raw = response.content[0].text.strip()
-    # Strip any accidental markdown fences
     raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
@@ -188,21 +235,19 @@ def index():
 
 @app.route('/api/think', methods=['POST'])
 def think():
-    data = request.get_json(force=True)
-    image_b64     = data.get('image')       # may be None
-    memory_ctx    = data.get('memory', '')
-    cycle         = data.get('cycle', 0)
+    data      = request.get_json(force=True)
+    image_b64 = data.get('image')
+    memory_ctx = data.get('memory', '')
+    cycle     = data.get('cycle', 0)
 
     try:
         result = query_claude(image_b64, memory_ctx, cycle)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    # Apply motor commands in a background thread (non-blocking)
     if 'move' in result:
         threading.Thread(target=apply_move_command, args=(result['move'],), daemon=True).start()
 
-    # Persist memory note
     if result.get('memo'):
         append_memory(result['memo'])
 
@@ -210,9 +255,8 @@ def think():
 
 @app.route('/api/cleanup_memory', methods=['POST'])
 def cleanup_memory():
-    data = request.get_json(force=True)
+    data    = request.get_json(force=True)
     entries = data.get('entries', [])
-
     try:
         cleaned = _ai_cleanup_memory(entries)
         save_memory(cleaned)
@@ -220,13 +264,12 @@ def cleanup_memory():
     except Exception as e:
         return jsonify({"error": str(e), "cleaned": entries}), 200
 
-def _ai_cleanup_memory(entries: list[str]) -> list[str]:
-    """Call Claude to deduplicate and clean the memory log."""
+def _ai_cleanup_memory(entries: list) -> list:
     if len(entries) < 5:
         return entries
 
-    blob = '\n'.join(entries[-100:])  # keep last 100 max
-    prompt = f"""You are a memory curator for a robot. 
+    blob = '\n'.join(entries[-100:])
+    prompt = f"""You are a memory curator for a robot.
 Below is a raw memory log with timestamps. Clean it:
 1. Remove exact or near-duplicate entries.
 2. Remove contradicted facts (keep the newer one).
@@ -249,7 +292,17 @@ Memory log:
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     setup_gpio()
-    print("[SERVER] Starting on http://0.0.0.0:5000")
+
+    # HTTPS is required for getUserMedia (camera) to work in browsers.
+    # Generate cert once: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=lepotato.local"
+    cert = ('cert.pem', 'key.pem')
+    if os.path.exists('cert.pem') and os.path.exists('key.pem'):
+        print("[SERVER] HTTPS enabled — open https://<ip>:5000")
+        ssl_ctx = cert
+    else:
+        print("[SERVER] WARNING: No cert.pem/key.pem found. Camera will not work over plain HTTP.")
+        print("[SERVER] Run: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj '/CN=lepotato.local'")
+        ssl_ctx = None
+
     print("[SERVER] Set ANTHROPIC_API_KEY in environment before running")
-    app.run(host='0.0.0.0', port=5000, threaded=True,
-        ssl_context=('cert.pem', 'key.pem'))
+    app.run(host='0.0.0.0', port=5000, threaded=True, ssl_context=ssl_ctx)
