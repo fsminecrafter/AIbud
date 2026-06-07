@@ -19,8 +19,13 @@ GPIO wiring — verified chip/line via `lgpio info PIN gpiod`:
 NOTE: lgpio.tx_pwm() only works on gpiochip0. Pins 16/18/33 are on gpiochip1
 so direction pins are plain digital writes and servo uses a background thread.
 
-Run (normal):
+Run (normal — local Ollama):
   sudo python3 server.py
+
+Run (offload AI to your PC):
+  Set OFFLOAD_URL below, then:
+  sudo python3 server.py
+  The PC must be running ai_server.py on the same LAN.
 
 Run (debug — full AI pipeline logging + /api/debug SSE stream):
   sudo python3 server.py --debug
@@ -136,6 +141,27 @@ OLLAMA_URL     = "http://localhost:11434"
 VISION_MODEL   = "moondream"
 TEXT_MODEL     = "llama3.2:3b"
 OLLAMA_TIMEOUT = 60
+
+# ── OFFLOAD CONFIG ────────────────────────────────────────────────────────────
+# Set this to your PC's LAN IP to offload all AI to ai_server.py there.
+# Leave as None to run Ollama locally (default, but slow on Le Potato).
+#
+# Example:  OFFLOAD_URL = "http://192.168.68.50:11435"
+OFFLOAD_URL     = None
+OFFLOAD_TIMEOUT = 120   # seconds — more generous since request crosses LAN + AI
+
+def _using_offload():
+    return bool(OFFLOAD_URL)
+
+def offload_available():
+    """Check if the offload PC server is reachable."""
+    if not OFFLOAD_URL:
+        return False
+    try:
+        r = req.get(f"{OFFLOAD_URL}/api/status", timeout=3)
+        return r.ok
+    except Exception:
+        return False
 
 def ollama_available():
     try:
@@ -335,6 +361,65 @@ def _extract_json(text):
             pass
     raise ValueError(f"No valid JSON found in response: {text[:200]}")
 
+def query_offload(image_b64, memory_context, cycle):
+    """
+    Forward the think request to ai_server.py running on the PC.
+    Same signature and return value as query_local.
+    """
+    cycle_tag = f"C{cycle}"
+    dbg_phase(f"Cycle {cycle} — offload to {OFFLOAD_URL}")
+    dbg(f"Forwarding to {OFFLOAD_URL}/api/think …", tag=cycle_tag)
+    t0 = time.time()
+    try:
+        resp = req.post(
+            f"{OFFLOAD_URL}/api/think",
+            json={"image": image_b64, "memory": memory_context, "cycle": cycle},
+            timeout=OFFLOAD_TIMEOUT,
+        )
+    except req.exceptions.ConnectionError as e:
+        dbg(f"Offload unreachable: {e}", level='ERROR', tag=cycle_tag)
+        raise RuntimeError(f"Offload server at {OFFLOAD_URL} is not reachable. Is ai_server.py running?")
+    except req.exceptions.Timeout:
+        dbg(f"Offload timed out after {OFFLOAD_TIMEOUT}s", level='ERROR', tag=cycle_tag)
+        raise RuntimeError(f"Offload server timed out after {OFFLOAD_TIMEOUT}s")
+
+    elapsed = time.time() - t0
+    dbg_time(f"Offload round-trip (cycle {cycle})", elapsed)
+
+    if not resp.ok:
+        dbg(f"Offload HTTP {resp.status_code}: {resp.text[:200]}", level='ERROR', tag=cycle_tag)
+        raise RuntimeError(f"Offload server returned HTTP {resp.status_code}: {resp.text[:200]}")
+
+    result = resp.json()
+    if 'error' in result:
+        dbg(f"Offload returned error: {result['error']}", level='ERROR', tag=cycle_tag)
+        raise RuntimeError(f"Offload AI error: {result['error']}")
+
+    result.setdefault('say',  '')
+    result.setdefault('move', {'dir': 'stop', 'speed': 0})
+    result.setdefault('memo', '')
+    result['move'].setdefault('dir',   'stop')
+    result['move'].setdefault('speed', 0)
+
+    dbg(f"Offload result → say={repr(result['say'][:40])}  move={result['move']}", level='OK', tag=cycle_tag)
+    return result
+
+def query_offload_cleanup(entries):
+    """Forward memory cleanup to the offload server."""
+    dbg(f"Forwarding cleanup ({len(entries)} entries) to {OFFLOAD_URL}…", tag='MEMORY')
+    try:
+        resp = req.post(
+            f"{OFFLOAD_URL}/api/cleanup_memory",
+            json={"entries": entries},
+            timeout=OFFLOAD_TIMEOUT,
+        )
+        if resp.ok:
+            return resp.json().get('cleaned', entries)
+    except Exception as e:
+        dbg(f"Offload cleanup failed: {e}", level='ERROR', tag='MEMORY')
+    return entries
+
+
 def query_local(image_b64, memory_context, cycle):
     cycle_tag = f"C{cycle}"
     t_total   = time.time()
@@ -529,13 +614,29 @@ def index():
 # ── /api/status ───────────────────────────────────────────────────────────────
 @app.route('/api/status')
 def status():
+    if _using_offload():
+        reachable = offload_available()
+        return jsonify({
+            "mode":         "offload",
+            "offload_url":  OFFLOAD_URL,
+            "offload_up":   reachable,
+            "gpio":         GPIO_AVAILABLE,
+            "debug":        DEBUG,
+            "pin_map": {
+                "servo":   f"chip{PIN_SERVO[0]} line{PIN_SERVO[1]} (bit-bang, phys33)",
+                "dc_pwm":  f"chip{PIN_DC_PWM[0]} line{PIN_DC_PWM[1]} (tx_pwm, phys12)",
+                "dc_dir1": f"chip{PIN_DC_DIR1[0]} line{PIN_DC_DIR1[1]} (phys16)",
+                "dc_dir2": f"chip{PIN_DC_DIR2[0]} line{PIN_DC_DIR2[1]} (phys18)",
+            }
+        })
     up     = ollama_available()
     models = ollama_models() if up else []
     return jsonify({
-        "ollama": up,
-        "models": models,
-        "gpio":   GPIO_AVAILABLE,
-        "debug":  DEBUG,
+        "mode":         "local",
+        "ollama":       up,
+        "models":       models,
+        "gpio":         GPIO_AVAILABLE,
+        "debug":        DEBUG,
         "vision_model": VISION_MODEL,
         "text_model":   TEXT_MODEL,
         "pin_map": {
@@ -553,12 +654,16 @@ def think():
     image_b64  = data.get('image')
     memory_ctx = data.get('memory', '')
     cycle      = data.get('cycle', 0)
-    dbg(f"--- /api/think  cycle={cycle}  image={'yes' if image_b64 else 'NO'}  mem_chars={len(memory_ctx)}", tag='REQUEST')
+    mode       = 'offload' if _using_offload() else 'local'
+    dbg(f"--- /api/think  cycle={cycle}  mode={mode}  image={'yes' if image_b64 else 'NO'}  mem_chars={len(memory_ctx)}", tag='REQUEST')
 
     try:
-        result = query_local(image_b64, memory_ctx, cycle)
+        if _using_offload():
+            result = query_offload(image_b64, memory_ctx, cycle)
+        else:
+            result = query_local(image_b64, memory_ctx, cycle)
     except Exception as e:
-        dbg(f"query_local raised: {e}", level='ERROR', tag='THINK')
+        dbg(f"think error ({mode}): {e}", level='ERROR', tag='THINK')
         if DEBUG:
             dbg(traceback.format_exc(), level='DATA', tag='THINK')
         return jsonify({"error": str(e)}), 500
@@ -577,7 +682,10 @@ def cleanup_memory():
     data    = request.get_json(force=True)
     entries = data.get('entries', [])
     try:
-        cleaned = cleanup_memory_local(entries)
+        if _using_offload():
+            cleaned = query_offload_cleanup(entries)
+        else:
+            cleaned = cleanup_memory_local(entries)
         save_memory(cleaned)
         return jsonify({"cleaned": cleaned})
     except Exception as e:
@@ -660,15 +768,28 @@ if __name__ == '__main__':
     setup_gpio()
     start_servo_thread()
 
-    dbg(f"Checking Ollama at {OLLAMA_URL}…", tag='STARTUP')
-    if ollama_available():
-        models = ollama_models()
-        dbg(f"Ollama OK — models: {models}", level='OK', tag='STARTUP')
-        if not models:
-            dbg(f"No models found! Run: ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}", level='ERROR', tag='STARTUP')
+    if _using_offload():
+        dbg(f"AI mode: OFFLOAD → {OFFLOAD_URL}", level='OK', tag='STARTUP')
+        if offload_available():
+            try:
+                r = req.get(f"{OFFLOAD_URL}/api/status", timeout=3)
+                info = r.json()
+                dbg(f"Offload server OK — models={info.get('models', '?')}  debug={info.get('debug', '?')}", level='OK', tag='STARTUP')
+            except Exception:
+                dbg("Offload reachable but status parse failed", level='WARN', tag='STARTUP')
+        else:
+            dbg(f"Offload server NOT reachable at {OFFLOAD_URL}", level='ERROR', tag='STARTUP')
+            dbg("Make sure ai_server.py is running on the PC and port 11435 is open", level='WARN', tag='STARTUP')
     else:
-        dbg("Ollama NOT reachable — start with: ollama serve", level='ERROR', tag='STARTUP')
-        dbg(f"Pull models after: ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}", level='WARN', tag='STARTUP')
+        dbg(f"AI mode: LOCAL (Ollama at {OLLAMA_URL})", tag='STARTUP')
+        dbg(f"Tip: set OFFLOAD_URL in server.py to use your PC instead", level='WARN', tag='STARTUP')
+        if ollama_available():
+            models = ollama_models()
+            dbg(f"Ollama OK — models: {models}", level='OK', tag='STARTUP')
+            if not models:
+                dbg(f"No models found! Run: ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}", level='ERROR', tag='STARTUP')
+        else:
+            dbg("Ollama NOT reachable — start with: ollama serve", level='ERROR', tag='STARTUP')
 
     if os.path.exists('cert.pem') and os.path.exists('key.pem'):
         dbg("HTTPS enabled — cert.pem / key.pem found", level='OK', tag='SERVER')
