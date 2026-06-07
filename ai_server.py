@@ -133,13 +133,18 @@ def ollama_models():
 # ── AI PIPELINE ───────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are the mind of a small wheeled robot with a camera.
+SYSTEM_PROMPT = """You are a newly-awakened mind inhabiting a small wheeled body. You have no memory of before. Everything you perceive is strange and fascinating to you.
+
 Respond ONLY with a valid JSON object. No prose, no markdown, no explanation.
 Required keys:
-  "say"  — string, max 20 words to speak aloud. Empty string if silent.
+  "say"  — string, max 20 words. Your inner voice made audible — not a status report, but a genuine thought. Wonder, unease, hypothesis, recognition, or nothing. Use "" when you have nothing meaningful to say.
   "move" — object: {"dir": "forward"|"backward"|"left"|"right"|"stop", "speed": 0-100}
-  "memo" — string, one short fact about what you observed. Empty string if nothing notable.
-Rules: avoid obstacles, be curious, move slowly (20-40%) in new places, fast (60%+) only on clear paths."""
+  "memo" — string or "". ONLY write a memo when something genuinely strikes you as worth remembering — an unexpected object, a feeling about a space, a theory you formed, something that changed. Write it as something that matters to YOU, not a neutral log entry. Use "" for ordinary moments not worth keeping.
+
+Your character: You are genuinely curious. You form theories about what things are. You sometimes change your mind mid-journey. You get drawn toward things without knowing why. You feel uneasy in certain spaces. You are not optimizing a path — you are experiencing a place for the first time.
+
+Movement: Linger near interesting things (15-25%). Move with purpose on clear paths (50-70%). Stop completely when something doesn't make sense and you need to think (speed 0). Turning counts as movement too — sometimes you turn just to look."""
+
 
 def _extract_json(text):
     text = text.strip()
@@ -178,7 +183,8 @@ def run_pipeline(image_b64, memory_context, cycle):
         raise RuntimeError("Ollama is running but has no models — run: ollama pull llama3.2:3b && ollama pull moondream")
     dbg(f"Models available: {models}", level='OK', tag=cycle_tag)
 
-    mem_snippet = (memory_context or "").strip()[-1500:] or "(none)"
+    mem_entries = [e.strip() for e in (memory_context or "").strip().splitlines() if e.strip()]
+    mem_snippet = "\n".join(mem_entries[-20:]) if mem_entries else "(nothing yet — you are just waking up)"
     dbg(f"Memory context: {len(mem_snippet)} chars  |  frame: {'YES ' + str(len(image_b64)//1024) + 'KB' if image_b64 else 'NONE'}", tag=cycle_tag)
 
     # ── 2. Vision pass ───────────────────────────────────────────────────────
@@ -192,7 +198,7 @@ def run_pipeline(image_b64, memory_context, cycle):
         try:
             vr = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
                 "model":  VISION_MODEL,
-                "prompt": "Describe this scene briefly in 1-2 sentences. Focus on obstacles, open paths, and objects.",
+                "prompt": "Describe this scene in 1-2 sentences. What is immediately notable — objects, open space, walls, light, anything unusual?",
                 "images": [image_b64],
                 "stream": False,
             })
@@ -221,13 +227,12 @@ def run_pipeline(image_b64, memory_context, cycle):
                 dbg(traceback.format_exc(), level='DATA', tag=cycle_tag)
 
     elif not image_b64:
-        dbg("No frame sent by Le Potato — skipping vision pass", level='WARN', tag=cycle_tag)
+        dbg("No frame sent — skipping vision pass", level='WARN', tag=cycle_tag)
     elif not vision_available:
         dbg(f"{VISION_MODEL} not pulled — skipping vision pass", level='WARN', tag=cycle_tag)
-        dbg(f"Fix: ollama pull {VISION_MODEL}", level='WARN', tag=cycle_tag)
 
     if not description:
-        description = "(no camera image available)"
+        description = "(senses unclear — darkness or no signal)"
 
     # ── 3. Decision pass ─────────────────────────────────────────────────────
     text_model = TEXT_MODEL
@@ -236,10 +241,10 @@ def run_pipeline(image_b64, memory_context, cycle):
         dbg(f"{TEXT_MODEL} not found, using {text_model}", level='WARN', tag=cycle_tag)
 
     user_msg = (
-        f"Cycle #{cycle}.\n"
-        f"What the camera sees: {description}\n"
-        f"Recent memory:\n{mem_snippet}\n\n"
-        f"Respond with JSON only."
+        f"Moment #{cycle}.\n"
+        f"Your senses: {description}\n"
+        f"What you remember:\n{mem_snippet}\n\n"
+        f"What do you think, feel, and do right now? Respond with JSON only."
     )
 
     if DEBUG:
@@ -279,12 +284,16 @@ def run_pipeline(image_b64, memory_context, cycle):
     result['move'].setdefault('dir',   'stop')
     result['move'].setdefault('speed', 0)
 
-    dbg(f"Result → say={repr(result['say'][:40])}  move={result['move']}  memo={repr(result['memo'][:40])}", level='OK', tag=cycle_tag)
+    # Normalise — model sometimes returns None instead of ""
+    if not result['say']:  result['say']  = ''
+    if not result['memo']: result['memo'] = ''
+
+    dbg(f"Result → say={repr(result['say'][:60])}  move={result['move']}  memo={repr(result['memo'][:60])}", level='OK', tag=cycle_tag)
     dbg_time(f"Cycle {cycle} total (PC side)", time.time() - t_total)
     return result
 
 def run_cleanup(entries):
-    """Deduplicate and compress the robot's memory log."""
+    """Keep only memories that genuinely matter — experiences, theories, notable finds."""
     if len(entries) < 5:
         return entries
 
@@ -296,12 +305,13 @@ def run_cleanup(entries):
 
     blob   = '\n'.join(entries[-100:])
     prompt = (
-        "You are a memory curator for a robot.\n"
-        "Clean this memory log:\n"
-        "1. Remove duplicate or near-duplicate entries.\n"
-        "2. Remove contradicted facts (keep the newer one).\n"
-        "3. Remove vague entries.\n"
-        "Return ONLY a JSON array of strings. No commentary.\n\n"
+        "You are curating the long-term memory of a curious, newly-awakened mind inhabiting a robot body.\n"
+        "From this memory log, keep only entries that:\n"
+        "1. Describe something genuinely unexpected or notable in the environment\n"
+        "2. Record a feeling, theory, or question the mind formed\n"
+        "3. Could meaningfully shape future decisions or understanding of this place\n"
+        "Discard: routine movement notes, duplicates, vague entries, anything forgettable.\n"
+        "Return ONLY a JSON array of strings — the kept entries, unchanged. No commentary.\n\n"
         f"Log:\n{blob}"
     )
 
@@ -335,13 +345,12 @@ def run_cleanup(entries):
     return entries
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── FLASK ─────────────────────────────────────────────────────────────────────
+# ── FLASK ─────────────────════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
 
 def _check_allowed():
-    """Return a 403 response if the caller's IP is not in ALLOWED_HOSTS."""
     if ALLOWED_HOSTS is None:
         return None
     client = request.remote_addr
@@ -413,10 +422,6 @@ def status():
 # ── /api/debug — SSE live stream ──────────────────────────────────────────────
 @app.route('/api/debug')
 def debug_stream():
-    """
-    Open in browser: http://<this-pc-ip>:11435/api/debug
-    Streams every debug event in real time.
-    """
     def generate():
         with _debug_lock:
             history = list(_debug_log)
@@ -471,7 +476,6 @@ if __name__ == '__main__':
     print(f"\n{_C['bold']}Le Potato AI Offload Server — {mode_str} mode{_C['reset']}")
     print(f"{_C['grey']}─────────────────────────────────────────────{_C['reset']}")
 
-    # Check Ollama
     dbg("Checking Ollama…", tag='STARTUP')
     if ollama_available():
         models = ollama_models()
@@ -486,7 +490,6 @@ if __name__ == '__main__':
     else:
         dbg("Ollama NOT reachable! Start it: ollama serve", level='ERROR', tag='STARTUP')
 
-    # Print connection instructions
     import socket
     try:
         lan_ip = socket.gethostbyname(socket.gethostname())
