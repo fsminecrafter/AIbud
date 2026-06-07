@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Le Potato — AI Body</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap');
+
+  :root {
+    --bg: #0d0f12;
+    --surface: #141720;
+    --surface2: #1c2030;
+    --border: rgba(255,255,255,0.07);
+    --accent: #5e9cf5;
+    --accent2: #3de8a8;
+    --warn: #f5a623;
+    --danger: #f56565;
+    --text: #e8eaf0;
+    --muted: #6b7280;
+    --mono: 'DM Mono', monospace;
+    --sans: 'Outfit', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: 52px 1fr;
+    grid-template-columns: 1fr;
+  }
+
+  /* HEADER */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 16px;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .logo { font-weight: 600; font-size: 15px; letter-spacing: -.2px; }
+  .logo span { color: var(--accent2); }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted);
+    transition: background .3s;
+    flex-shrink: 0;
+  }
+  .status-dot.live { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+  .header-status { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .spacer { flex: 1; }
+  .cycle-badge {
+    font-size: 11px; font-family: var(--mono);
+    background: var(--surface2); border: 1px solid var(--border);
+    padding: 3px 10px; border-radius: 20px; color: var(--muted);
+  }
+  .cycle-badge span { color: var(--accent); }
+
+  /* MAIN GRID */
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr 320px;
+    grid-template-rows: auto auto;
+    gap: 12px;
+    padding: 12px;
+    align-items: start;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 10px 14px 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted);
+  }
+  .panel-header .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+  }
+  .panel-header .dot.green { background: var(--accent2); }
+  .panel-header .dot.orange { background: var(--warn); }
+  .panel-header .dot.red { background: var(--danger); }
+
+  /* CAMERA PANEL */
+  .panel-camera { grid-column: 1; grid-row: 1 / 3; }
+  #camera-feed {
+    width: 100%; aspect-ratio: 4/3;
+    background: #080a0d;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 8px; color: var(--muted);
+    font-size: 13px; position: relative; overflow: hidden;
+  }
+  #camera-feed video, #camera-feed canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  }
+  .cam-overlay {
+    position: absolute; inset: 0; pointer-events: none;
+    border: 2px solid rgba(94,156,245,0.15);
+    border-radius: 0;
+  }
+  .cam-corner {
+    position: absolute; width: 16px; height: 16px;
+    border-color: var(--accent); border-style: solid; opacity: .6;
+  }
+  .cam-corner.tl { top: 8px; left: 8px; border-width: 2px 0 0 2px; }
+  .cam-corner.tr { top: 8px; right: 8px; border-width: 2px 2px 0 0; }
+  .cam-corner.bl { bottom: 8px; left: 8px; border-width: 0 0 2px 2px; }
+  .cam-corner.br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
+  .cam-status-bar {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,.7));
+    padding: 20px 10px 8px;
+    font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,.5);
+    display: flex; justify-content: space-between;
+  }
+  #cam-timestamp { color: var(--accent2); }
+
+  .cam-controls {
+    padding: 10px 12px;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .btn {
+    padding: 6px 14px; border-radius: 8px;
+    font-family: var(--sans); font-size: 13px; font-weight: 500;
+    cursor: pointer; border: 1px solid var(--border);
+    background: var(--surface2); color: var(--text);
+    transition: background .15s, transform .1s;
+  }
+  .btn:hover { background: rgba(255,255,255,.05); }
+  .btn:active { transform: scale(.97); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .btn.primary:hover { background: #4a87e8; }
+  .btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
+  .btn.sm { padding: 4px 10px; font-size: 12px; }
+  select.btn { appearance: none; padding-right: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 8px center;
+  }
+  .interval-row {
+    padding: 0 12px 10px;
+    display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted);
+  }
+  .interval-row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .interval-val { font-family: var(--mono); color: var(--text); min-width: 36px; }
+
+  /* AI RESPONSE PANEL */
+  .panel-ai { grid-column: 2; grid-row: 1; }
+  #ai-response-box {
+    padding: 14px;
+    min-height: 140px;
+  }
+  .ai-field { margin-bottom: 12px; }
+  .ai-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--muted); margin-bottom: 4px; font-weight: 500;
+  }
+  .ai-value {
+    font-size: 14px; color: var(--text); line-height: 1.5;
+  }
+  .ai-value.mono { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .ai-value.speech { font-size: 15px; color: var(--accent2); font-style: italic; }
+  .json-raw {
+    font-family: var(--mono); font-size: 11px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px;
+    color: var(--muted); white-space: pre-wrap; word-break: break-all;
+    max-height: 100px; overflow-y: auto; line-height: 1.6;
+  }
+  .json-raw .key { color: #7db4f4; }
+  .json-raw .str { color: var(--accent2); }
+  .json-raw .num { color: var(--warn); }
+
+  /* MOTOR PANEL */
+  .panel-motor { grid-column: 2; grid-row: 2; }
+  .motor-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 10px; padding: 14px;
+  }
+  .motor-card {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px;
+  }
+  .motor-card .mc-title { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-weight: 500; text-transform: uppercase; letter-spacing: .07em; }
+  .motor-card .mc-val { font-size: 22px; font-weight: 600; font-family: var(--mono); color: var(--accent); }
+  .motor-card .mc-unit { font-size: 12px; color: var(--muted); margin-left: 4px; }
+
+  .servo-vis {
+    margin-top: 8px; width: 100%; height: 40px; position: relative;
+  }
+  .servo-arc {
+    width: 70px; height: 35px; border: 2px solid rgba(94,156,245,.2);
+    border-bottom: none; border-radius: 70px 70px 0 0;
+    margin: 0 auto; position: relative;
+  }
+  .servo-needle {
+    position: absolute; bottom: 0; left: 50%; width: 2px; height: 32px;
+    background: var(--accent); transform-origin: bottom center;
+    transform: translateX(-50%) rotate(0deg);
+    border-radius: 1px;
+    transition: transform .4s ease;
+  }
+
+  .dc-bar-wrap {
+    height: 8px; background: var(--border);
+    border-radius: 4px; overflow: hidden; margin-top: 4px;
+  }
+  .dc-bar {
+    height: 100%; background: var(--accent2); border-radius: 4px;
+    width: 0%; transition: width .4s ease;
+  }
+  .dir-badge {
+    display: inline-block; font-size: 11px; font-family: var(--mono);
+    padding: 2px 8px; border-radius: 4px; margin-top: 6px;
+    background: rgba(61,232,168,.12); color: var(--accent2); border: 1px solid rgba(61,232,168,.2);
+  }
+
+  /* SIDEBAR */
+  .panel-sidebar { grid-column: 3; grid-row: 1 / 3; display: flex; flex-direction: column; gap: 12px; }
+
+  /* VOICE BOX */
+  .voice-box { padding: 12px; }
+  #speech-text {
+    font-size: 14px; color: var(--text); min-height: 40px;
+    line-height: 1.6; font-style: italic;
+    border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 10px;
+  }
+  #speech-text.empty { color: var(--muted); font-style: normal; }
+  .voice-controls { display: flex; gap: 6px; align-items: center; }
+  #voice-select { flex: 1; }
+  .tts-wave {
+    display: flex; align-items: flex-end; gap: 2px; height: 20px; padding: 0 4px;
+  }
+  .tts-wave span {
+    display: block; width: 3px; background: var(--accent2);
+    border-radius: 2px; opacity: 0; transition: height .1s;
+  }
+  .tts-wave.speaking span {
+    animation: wave 0.7s ease-in-out infinite;
+    opacity: 1;
+  }
+  .tts-wave span:nth-child(1) { animation-delay: 0s; }
+  .tts-wave span:nth-child(2) { animation-delay: .1s; }
+  .tts-wave span:nth-child(3) { animation-delay: .2s; }
+  .tts-wave span:nth-child(4) { animation-delay: .1s; }
+  .tts-wave span:nth-child(5) { animation-delay: 0s; }
+  @keyframes wave {
+    0%, 100% { height: 4px; }
+    50% { height: 16px; }
+  }
+
+  /* MEMORY LOG */
+  .memory-box { flex: 1; display: flex; flex-direction: column; }
+  #memory-log {
+    flex: 1; overflow-y: auto; padding: 10px 12px;
+    max-height: 280px; min-height: 140px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .mem-entry {
+    font-family: var(--mono); font-size: 11px;
+    padding: 5px 8px; border-radius: 4px;
+    border-left: 2px solid var(--border);
+    color: var(--muted); line-height: 1.5;
+    background: transparent;
+    transition: border-color .3s;
+  }
+  .mem-entry.new {
+    border-color: var(--accent2); color: var(--text);
+  }
+  .mem-entry.cleaned { border-color: var(--warn); opacity: .6; }
+  .mem-controls {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    display: flex; gap: 6px; align-items: center;
+  }
+  .cleanup-progress {
+    flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
+  }
+  .cleanup-fill {
+    height: 100%; background: var(--warn); width: 0%;
+    transition: width 1s linear;
+  }
+  .cleanup-label { font-size: 11px; font-family: var(--mono); color: var(--muted); min-width: 60px; text-align: right; }
+
+  /* SYSTEM LOG */
+  .panel-log { grid-column: 1 / 3; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+  #sys-log {
+    font-family: var(--mono); font-size: 11px;
+    padding: 8px 12px; max-height: 100px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .log-line { display: flex; gap: 10px; }
+  .log-time { color: var(--muted); flex-shrink: 0; }
+  .log-msg { color: var(--text); }
+  .log-msg.ok { color: var(--accent2); }
+  .log-msg.warn { color: var(--warn); }
+  .log-msg.err { color: var(--danger); }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* SPINNER */
+  .spin {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin.hidden { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Le<span>Potato</span> AI Body</div>
+  <div class="status-dot" id="live-dot"></div>
+  <div class="header-status" id="header-status">idle — press Start</div>
+  <div class="spacer"></div>
+  <div class="cycle-badge">cycle <span id="cycle-count">0</span></div>
+  <div class="spin hidden" id="header-spin"></div>
+</header>
+
+<main>
+
+  <!-- CAMERA -->
+  <div class="panel panel-camera">
+    <div class="panel-header">
+      <div class="dot green"></div>
+      Vision input
+    </div>
+    <div id="camera-feed">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity=".3"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="M16 3l-4 4-4-4"/><circle cx="12" cy="14" r="3"/></svg>
+      <span id="cam-placeholder">No camera active</span>
+      <video id="video-el" autoplay playsinline style="display:none"></video>
+      <canvas id="snapshot-canvas" style="display:none"></canvas>
+      <div class="cam-overlay">
+        <div class="cam-corner tl"></div>
+        <div class="cam-corner tr"></div>
+        <div class="cam-corner bl"></div>
+        <div class="cam-corner br"></div>
+      </div>
+      <div class="cam-status-bar">
+        <span id="cam-res">—</span>
+        <span id="cam-timestamp">—</span>
+      </div>
+    </div>
+    <div class="cam-controls">
+      <button class="btn primary sm" id="btn-webcam">Use Webcam</button>
+      <select class="btn sm" id="source-select">
+        <option value="webcam">Webcam</option>
+        <option value="phone">Phone (via URL)</option>
+      </select>
+    </div>
+    <div class="interval-row">
+      <span>Capture every</span>
+      <input type="range" id="interval-slider" min="2" max="30" value="5" step="1">
+      <span class="interval-val" id="interval-val">5s</span>
+    </div>
+    <div style="padding: 0 12px 10px; display:flex; gap:8px;">
+      <button class="btn primary" id="btn-start" style="flex:1">▶ Start loop</button>
+      <button class="btn danger" id="btn-stop" style="flex:1" disabled>■ Stop</button>
+    </div>
+  </div>
+
+  <!-- AI RESPONSE -->
+  <div class="panel panel-ai">
+    <div class="panel-header">
+      <div class="dot"></div>
+      AI response
+    </div>
+    <div id="ai-response-box">
+      <div class="ai-field">
+        <div class="ai-label">Speech</div>
+        <div class="ai-value speech" id="ai-say">Waiting for first frame…</div>
+      </div>
+      <div class="ai-field">
+        <div class="ai-label">Motor command</div>
+        <div class="ai-value mono" id="ai-move">—</div>
+      </div>
+      <div class="ai-field">
+        <div class="ai-label">Memory note</div>
+        <div class="ai-value mono" id="ai-memo">—</div>
+      </div>
+      <div class="ai-field">
+        <div class="ai-label">Raw JSON</div>
+        <pre class="json-raw" id="ai-json">{ }</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- MOTORS -->
+  <div class="panel panel-motor">
+    <div class="panel-header">
+      <div class="dot green"></div>
+      Motor state
+    </div>
+    <div class="motor-grid">
+      <!-- Servo -->
+      <div class="motor-card">
+        <div class="mc-title">Servo — direction</div>
+        <div class="mc-val" id="servo-deg">0<span class="mc-unit">°</span></div>
+        <div class="servo-vis">
+          <div class="servo-arc">
+            <div class="servo-needle" id="servo-needle"></div>
+          </div>
+        </div>
+      </div>
+      <!-- DC Motor -->
+      <div class="motor-card">
+        <div class="mc-title">DC motor — speed</div>
+        <div class="mc-val" id="dc-speed">0<span class="mc-unit">%</span></div>
+        <div class="dc-bar-wrap"><div class="dc-bar" id="dc-bar"></div></div>
+        <div class="dir-badge" id="dir-badge">STOP</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SIDEBAR -->
+  <div class="panel-sidebar">
+
+    <!-- VOICE -->
+    <div class="panel" style="flex-shrink:0">
+      <div class="panel-header">
+        <div class="dot orange"></div>
+        Voice output
+        <div class="tts-wave" id="tts-wave">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </div>
+      <div class="voice-box">
+        <div id="speech-text" class="empty">Nothing said yet.</div>
+        <div class="voice-controls">
+          <select class="btn sm" id="voice-select" style="flex:1"></select>
+          <button class="btn sm" id="btn-speak">▶ Replay</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MEMORY -->
+    <div class="panel memory-box">
+      <div class="panel-header">
+        <div class="dot orange"></div>
+        Memory log
+      </div>
+      <div id="memory-log">
+        <div class="mem-entry">Log will appear here…</div>
+      </div>
+      <div class="mem-controls">
+        <button class="btn sm" id="btn-cleanup">🧹 Clean now</button>
+        <div class="cleanup-progress">
+          <div class="cleanup-fill" id="cleanup-fill"></div>
+        </div>
+        <div class="cleanup-label" id="cleanup-label">—</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- SYSTEM LOG (bottom, spans cols 1–2) -->
+  <div class="panel panel-log" style="grid-column: 1 / 3; grid-row: 3;">
+    <div class="panel-header"><div class="dot"></div>System log</div>
+    <div id="sys-log"></div>
+  </div>
+
+</main>
+
+<script>
+// ─── CONFIG ─────────────────────────────────────────
+const API_URL = '/api/think'; // Replace with your Python server endpoint
+const MEMORY_FILE_KEY = 'lepotato_memory';
+const CLEANUP_EVERY = 10; // clean memory every N cycles
+
+// ─── STATE ──────────────────────────────────────────
+let loopTimer = null;
+let cycleCount = 0;
+let intervalSec = 5;
+let currentStream = null;
+let lastSpeech = '';
+let memoryEntries = JSON.parse(localStorage.getItem(MEMORY_FILE_KEY) || '[]');
+let synth = window.speechSynthesis;
+let currentUtterance = null;
+let voices = [];
+
+// ─── VOICE INIT ─────────────────────────────────────
+function loadVoices() {
+  voices = synth.getVoices().filter(v => v.lang.startsWith('en'));
+  const sel = document.getElementById('voice-select');
+  sel.innerHTML = '';
+  voices.forEach((v, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = v.name.substring(0, 28);
+    sel.appendChild(opt);
+  });
+  if (!voices.length) {
+    sel.innerHTML = '<option>No voices available</option>';
+  }
+}
+synth.onvoiceschanged = loadVoices;
+loadVoices();
+
+function speak(text) {
+  if (!text || !synth) return;
+  synth.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  const vi = parseInt(document.getElementById('voice-select').value) || 0;
+  if (voices[vi]) utt.voice = voices[vi];
+  utt.rate = 1.0;
+  utt.pitch = 1.0;
+  const wave = document.getElementById('tts-wave');
+  utt.onstart = () => wave.classList.add('speaking');
+  utt.onend = () => wave.classList.remove('speaking');
+  synth.speak(utt);
+  currentUtterance = utt;
+}
+
+document.getElementById('btn-speak').onclick = () => speak(lastSpeech);
+
+// ─── CAMERA ─────────────────────────────────────────
+async function startWebcam() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    currentStream = stream;
+    const vid = document.getElementById('video-el');
+    vid.srcObject = stream;
+    vid.style.display = 'block';
+    document.getElementById('cam-placeholder').style.display = 'none';
+    vid.onloadedmetadata = () => {
+      document.getElementById('cam-res').textContent = vid.videoWidth + '×' + vid.videoHeight;
+    };
+    sysLog('Webcam started', 'ok');
+  } catch(e) {
+    sysLog('Camera error: ' + e.message, 'err');
+  }
+}
+document.getElementById('btn-webcam').onclick = startWebcam;
+
+function captureFrame() {
+  const vid = document.getElementById('video-el');
+  const canvas = document.getElementById('snapshot-canvas');
+  if (!vid.videoWidth) return null;
+  canvas.width = 320; canvas.height = 240;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(vid, 0, 0, 320, 240);
+  document.getElementById('cam-timestamp').textContent = new Date().toLocaleTimeString();
+  return canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+}
+
+// ─── INTERVAL SLIDER ────────────────────────────────
+document.getElementById('interval-slider').oninput = function() {
+  intervalSec = parseInt(this.value);
+  document.getElementById('interval-val').textContent = intervalSec + 's';
+};
+
+// ─── MAIN LOOP ──────────────────────────────────────
+async function runCycle() {
+  cycleCount++;
+  document.getElementById('cycle-count').textContent = cycleCount;
+  document.getElementById('header-status').textContent = 'thinking…';
+  document.getElementById('header-spin').classList.remove('hidden');
+
+  const imageB64 = captureFrame();
+  const memContext = memoryEntries.slice(-20).join('\n');
+
+  try {
+    const payload = {
+      image: imageB64,
+      memory: memContext,
+      cycle: cycleCount
+    };
+
+    // Call backend (Python Flask/FastAPI server on same machine)
+    const resp = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+
+    updateUI(data);
+    sysLog(`Cycle ${cycleCount} OK — ${data.say ? '"' + data.say.substring(0,40) + '"' : 'no speech'}`, 'ok');
+
+  } catch(e) {
+    // DEMO MODE: simulate a response when no backend is running
+    const demo = demoResponse(cycleCount);
+    updateUI(demo);
+    sysLog(`Cycle ${cycleCount} — demo mode (${e.message})`, 'warn');
+  }
+
+  if (cycleCount % CLEANUP_EVERY === 0) {
+    await cleanMemory();
+  }
+
+  document.getElementById('header-spin').classList.add('hidden');
+  document.getElementById('header-status').textContent = `cycle ${cycleCount} — next in ${intervalSec}s`;
+}
+
+function demoResponse(n) {
+  const scenarios = [
+    { say: "I see a wall ahead. Turning right.", move: { dir: "right", speed: 40 }, memo: "wall detected at front" },
+    { say: "Path looks clear. Moving forward.", move: { dir: "forward", speed: 65 }, memo: "open corridor ahead" },
+    { say: "Something interesting over there. Investigating.", move: { dir: "left", speed: 30 }, memo: "object on left side" },
+    { say: "I should stop and observe.", move: { dir: "stop", speed: 0 }, memo: "pausing to assess environment" },
+    { say: "Low light. Slowing down to be careful.", move: { dir: "forward", speed: 20 }, memo: "dim lighting detected" },
+  ];
+  return scenarios[n % scenarios.length];
+}
+
+// ─── UI UPDATE ──────────────────────────────────────
+function updateUI(data) {
+  // Speech
+  const sayText = data.say || '';
+  document.getElementById('ai-say').textContent = sayText || '(silent)';
+  if (sayText && sayText !== lastSpeech) {
+    lastSpeech = sayText;
+    document.getElementById('speech-text').textContent = sayText;
+    document.getElementById('speech-text').classList.remove('empty');
+    speak(sayText);
+  }
+
+  // Move
+  const move = data.move || {};
+  const dir = (move.dir || 'stop').toUpperCase();
+  const speed = Math.min(100, Math.max(0, move.speed || 0));
+  const servoAngle = dirToAngle(move.dir || 'stop');
+
+  document.getElementById('ai-move').textContent = `dir=${dir} speed=${speed}%`;
+  document.getElementById('servo-deg').innerHTML = servoAngle + '<span class="mc-unit">°</span>';
+  document.getElementById('servo-needle').style.transform = `translateX(-50%) rotate(${servoAngle - 90}deg)`;
+  document.getElementById('dc-speed').innerHTML = speed + '<span class="mc-unit">%</span>';
+  document.getElementById('dc-bar').style.width = speed + '%';
+  document.getElementById('dir-badge').textContent = dir;
+
+  // Memo
+  const memo = data.memo || '';
+  document.getElementById('ai-memo').textContent = memo || '—';
+  if (memo) addMemory(memo);
+
+  // Raw JSON
+  document.getElementById('ai-json').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
+}
+
+function dirToAngle(dir) {
+  const map = { forward: 90, backward: 90, left: 45, right: 135, stop: 90 };
+  return map[dir] || 90;
+}
+
+// ─── MEMORY ─────────────────────────────────────────
+function addMemory(entry) {
+  const ts = new Date().toLocaleTimeString();
+  const line = `[${ts}] ${entry}`;
+  memoryEntries.push(line);
+  localStorage.setItem(MEMORY_FILE_KEY, JSON.stringify(memoryEntries));
+  renderMemory();
+}
+
+function renderMemory() {
+  const log = document.getElementById('memory-log');
+  log.innerHTML = '';
+  const recent = memoryEntries.slice(-30);
+  recent.forEach((e, i) => {
+    const div = document.createElement('div');
+    div.className = 'mem-entry' + (i === recent.length - 1 ? ' new' : '');
+    div.textContent = e;
+    log.appendChild(div);
+  });
+  log.scrollTop = log.scrollHeight;
+}
+
+async function cleanMemory() {
+  if (!memoryEntries.length) return;
+  sysLog('Running memory cleanup…', 'warn');
+  const fill = document.getElementById('cleanup-fill');
+  const label = document.getElementById('cleanup-label');
+  fill.style.width = '0%';
+  label.textContent = 'cleaning…';
+
+  // Animate progress
+  let p = 0;
+  const tick = setInterval(() => { p = Math.min(90, p + 10); fill.style.width = p + '%'; }, 300);
+
+  try {
+    const resp = await fetch('/api/cleanup_memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries: memoryEntries }),
+      signal: AbortSignal.timeout(20000)
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      memoryEntries = data.cleaned || memoryEntries;
+    }
+  } catch(e) {
+    // Demo: just dedupe
+    const seen = new Set();
+    memoryEntries = memoryEntries.filter(e => { if (seen.has(e)) return false; seen.add(e); return true; });
+    sysLog('Memory cleanup done (local dedupe only — no backend)', 'warn');
+  }
+
+  clearInterval(tick);
+  fill.style.width = '100%';
+  label.textContent = memoryEntries.length + ' entries';
+  localStorage.setItem(MEMORY_FILE_KEY, JSON.stringify(memoryEntries));
+  setTimeout(() => { fill.style.width = '0%'; label.textContent = '—'; }, 2000);
+  renderMemory();
+}
+
+document.getElementById('btn-cleanup').onclick = cleanMemory;
+
+// ─── LOOP CONTROL ────────────────────────────────────
+document.getElementById('btn-start').onclick = async () => {
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled = false;
+  document.getElementById('live-dot').classList.add('live');
+  await startWebcam();
+  await runCycle();
+  loopTimer = setInterval(runCycle, intervalSec * 1000);
+};
+
+document.getElementById('btn-stop').onclick = () => {
+  clearInterval(loopTimer);
+  loopTimer = null;
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-stop').disabled = true;
+  document.getElementById('live-dot').classList.remove('live');
+  document.getElementById('header-status').textContent = 'stopped';
+  sysLog('Loop stopped', 'warn');
+};
+
+// ─── SYS LOG ────────────────────────────────────────
+function sysLog(msg, cls='') {
+  const log = document.getElementById('sys-log');
+  const div = document.createElement('div');
+  div.className = 'log-line';
+  const t = new Date().toLocaleTimeString();
+  div.innerHTML = `<span class="log-time">${t}</span><span class="log-msg ${cls}">${msg}</span>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  if (log.children.length > 80) log.removeChild(log.firstChild);
+}
+
+// ─── JSON HIGHLIGHT ─────────────────────────────────
+function syntaxHighlight(json) {
+  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match) {
+    let cls = 'num';
+    if (/^"/.test(match)) {
+      if (/:$/.test(match)) cls = 'key';
+      else cls = 'str';
+    }
+    return '<span class="' + cls + '">' + match + '</span>';
+  });
+}
+
+// ─── INIT ────────────────────────────────────────────
+renderMemory();
+sysLog('Dashboard ready — Ubuntu 22.04 LTS target', 'ok');
+sysLog('Press ▶ Start loop to begin', '');
+</script>
+</body>
+</html>
