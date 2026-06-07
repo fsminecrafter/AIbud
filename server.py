@@ -251,4 +251,5 @@ if __name__ == '__main__':
     setup_gpio()
     print("[SERVER] Starting on http://0.0.0.0:5000")
     print("[SERVER] Set ANTHROPIC_API_KEY in environment before running")
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    app.run(host='0.0.0.0', port=5000, threaded=True,
+        ssl_context=('cert.pem', 'key.pem'))
