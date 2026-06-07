@@ -54,6 +54,7 @@
     flex-shrink: 0;
   }
   .status-dot.live { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+  .status-dot.warming { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
   .header-status { font-size: 12px; color: var(--muted); font-family: var(--mono); }
   .spacer { flex: 1; }
   .cycle-badge {
@@ -109,7 +110,6 @@
   .cam-overlay {
     position: absolute; inset: 0; pointer-events: none;
     border: 2px solid rgba(94,156,245,0.15);
-    border-radius: 0;
   }
   .cam-corner {
     position: absolute; width: 16px; height: 16px;
@@ -145,6 +145,7 @@
   .btn.primary:hover { background: #4a87e8; }
   .btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
   .btn.sm { padding: 4px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
   select.btn { appearance: none; padding-right: 24px;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat; background-position: right 8px center;
@@ -158,20 +159,17 @@
 
   /* AI RESPONSE PANEL */
   .panel-ai { grid-column: 2; grid-row: 1; }
-  #ai-response-box {
-    padding: 14px;
-    min-height: 140px;
-  }
+  #ai-response-box { padding: 14px; min-height: 140px; }
   .ai-field { margin-bottom: 12px; }
   .ai-label {
     font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
     color: var(--muted); margin-bottom: 4px; font-weight: 500;
   }
-  .ai-value {
-    font-size: 14px; color: var(--text); line-height: 1.5;
-  }
+  .ai-value { font-size: 14px; color: var(--text); line-height: 1.5; }
   .ai-value.mono { font-family: var(--mono); font-size: 12px; color: var(--accent); }
   .ai-value.speech { font-size: 15px; color: var(--accent2); font-style: italic; }
+  .ai-value.silent { color: var(--muted); font-style: italic; font-size: 13px; }
+  .ai-value.no-memo { color: var(--muted); font-style: italic; font-size: 12px; }
   .json-raw {
     font-family: var(--mono); font-size: 11px;
     background: var(--bg); border: 1px solid var(--border);
@@ -185,10 +183,7 @@
 
   /* MOTOR PANEL */
   .panel-motor { grid-column: 2; grid-row: 2; }
-  .motor-grid {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 10px; padding: 14px;
-  }
+  .motor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; }
   .motor-card {
     background: var(--bg); border: 1px solid var(--border);
     border-radius: 8px; padding: 12px;
@@ -197,9 +192,7 @@
   .motor-card .mc-val { font-size: 22px; font-weight: 600; font-family: var(--mono); color: var(--accent); }
   .motor-card .mc-unit { font-size: 12px; color: var(--muted); margin-left: 4px; }
 
-  .servo-vis {
-    margin-top: 8px; width: 100%; height: 40px; position: relative;
-  }
+  .servo-vis { margin-top: 8px; width: 100%; height: 40px; position: relative; }
   .servo-arc {
     width: 70px; height: 35px; border: 2px solid rgba(94,156,245,.2);
     border-bottom: none; border-radius: 70px 70px 0 0;
@@ -209,18 +202,10 @@
     position: absolute; bottom: 0; left: 50%; width: 2px; height: 32px;
     background: var(--accent); transform-origin: bottom center;
     transform: translateX(-50%) rotate(0deg);
-    border-radius: 1px;
-    transition: transform .4s ease;
+    border-radius: 1px; transition: transform .4s ease;
   }
-
-  .dc-bar-wrap {
-    height: 8px; background: var(--border);
-    border-radius: 4px; overflow: hidden; margin-top: 4px;
-  }
-  .dc-bar {
-    height: 100%; background: var(--accent2); border-radius: 4px;
-    width: 0%; transition: width .4s ease;
-  }
+  .dc-bar-wrap { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .dc-bar { height: 100%; background: var(--accent2); border-radius: 4px; width: 0%; transition: width .4s ease; }
   .dir-badge {
     display: inline-block; font-size: 11px; font-family: var(--mono);
     padding: 2px 8px; border-radius: 4px; margin-top: 6px;
@@ -239,27 +224,15 @@
   }
   #speech-text.empty { color: var(--muted); font-style: normal; }
   .voice-controls { display: flex; gap: 6px; align-items: center; }
-  #voice-select { flex: 1; }
-  .tts-wave {
-    display: flex; align-items: flex-end; gap: 2px; height: 20px; padding: 0 4px;
-  }
-  .tts-wave span {
-    display: block; width: 3px; background: var(--accent2);
-    border-radius: 2px; opacity: 0; transition: height .1s;
-  }
-  .tts-wave.speaking span {
-    animation: wave 0.7s ease-in-out infinite;
-    opacity: 1;
-  }
+  .tts-wave { display: flex; align-items: flex-end; gap: 2px; height: 20px; padding: 0 4px; }
+  .tts-wave span { display: block; width: 3px; background: var(--accent2); border-radius: 2px; opacity: 0; transition: height .1s; }
+  .tts-wave.speaking span { animation: wave 0.7s ease-in-out infinite; opacity: 1; }
   .tts-wave span:nth-child(1) { animation-delay: 0s; }
   .tts-wave span:nth-child(2) { animation-delay: .1s; }
   .tts-wave span:nth-child(3) { animation-delay: .2s; }
   .tts-wave span:nth-child(4) { animation-delay: .1s; }
   .tts-wave span:nth-child(5) { animation-delay: 0s; }
-  @keyframes wave {
-    0%, 100% { height: 4px; }
-    50% { height: 16px; }
-  }
+  @keyframes wave { 0%, 100% { height: 4px; } 50% { height: 16px; } }
 
   /* MEMORY LOG */
   .memory-box { flex: 1; display: flex; flex-direction: column; }
@@ -273,25 +246,16 @@
     padding: 5px 8px; border-radius: 4px;
     border-left: 2px solid var(--border);
     color: var(--muted); line-height: 1.5;
-    background: transparent;
-    transition: border-color .3s;
+    background: transparent; transition: border-color .3s;
   }
-  .mem-entry.new {
-    border-color: var(--accent2); color: var(--text);
-  }
+  .mem-entry.new { border-color: var(--accent2); color: var(--text); }
   .mem-entry.cleaned { border-color: var(--warn); opacity: .6; }
   .mem-controls {
-    padding: 8px 12px;
-    border-top: 1px solid var(--border);
+    padding: 8px 12px; border-top: 1px solid var(--border);
     display: flex; gap: 6px; align-items: center;
   }
-  .cleanup-progress {
-    flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
-  }
-  .cleanup-fill {
-    height: 100%; background: var(--warn); width: 0%;
-    transition: width 1s linear;
-  }
+  .cleanup-progress { flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .cleanup-fill { height: 100%; background: var(--warn); width: 0%; transition: width 1s linear; }
   .cleanup-label { font-size: 11px; font-family: var(--mono); color: var(--muted); min-width: 60px; text-align: right; }
 
   /* SYSTEM LOG */
@@ -308,20 +272,11 @@
   .log-msg.warn { color: var(--warn); }
   .log-msg.err { color: var(--danger); }
 
-  /* SCROLLBAR */
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  /* SPINNER */
-  .spin {
-    width: 14px; height: 14px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin .7s linear infinite;
-    flex-shrink: 0;
-  }
+  .spin { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spin.hidden { display: none; }
 </style>
@@ -341,20 +296,15 @@
 
   <!-- CAMERA -->
   <div class="panel panel-camera">
-    <div class="panel-header">
-      <div class="dot green"></div>
-      Vision input
-    </div>
+    <div class="panel-header"><div class="dot green"></div>Vision input</div>
     <div id="camera-feed">
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity=".3"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="M16 3l-4 4-4-4"/><circle cx="12" cy="14" r="3"/></svg>
       <span id="cam-placeholder">No camera active</span>
       <video id="video-el" autoplay playsinline style="display:none"></video>
       <canvas id="snapshot-canvas" style="display:none"></canvas>
       <div class="cam-overlay">
-        <div class="cam-corner tl"></div>
-        <div class="cam-corner tr"></div>
-        <div class="cam-corner bl"></div>
-        <div class="cam-corner br"></div>
+        <div class="cam-corner tl"></div><div class="cam-corner tr"></div>
+        <div class="cam-corner bl"></div><div class="cam-corner br"></div>
       </div>
       <div class="cam-status-bar">
         <span id="cam-res">—</span>
@@ -365,7 +315,6 @@
       <button class="btn primary sm" id="btn-webcam">Use Webcam</button>
       <select class="btn sm" id="source-select">
         <option value="webcam">Webcam</option>
-        <option value="phone">Phone (via URL)</option>
       </select>
     </div>
     <div class="interval-row">
@@ -381,14 +330,11 @@
 
   <!-- AI RESPONSE -->
   <div class="panel panel-ai">
-    <div class="panel-header">
-      <div class="dot"></div>
-      AI response
-    </div>
+    <div class="panel-header"><div class="dot"></div>AI response</div>
     <div id="ai-response-box">
       <div class="ai-field">
-        <div class="ai-label">Speech</div>
-        <div class="ai-value speech" id="ai-say">Waiting for first frame…</div>
+        <div class="ai-label">Inner voice</div>
+        <div class="ai-value speech" id="ai-say">Waiting for first cycle…</div>
       </div>
       <div class="ai-field">
         <div class="ai-label">Motor command</div>
@@ -396,7 +342,7 @@
       </div>
       <div class="ai-field">
         <div class="ai-label">Memory note</div>
-        <div class="ai-value mono" id="ai-memo">—</div>
+        <div class="ai-value no-memo" id="ai-memo">nothing this cycle</div>
       </div>
       <div class="ai-field">
         <div class="ai-label">Raw JSON</div>
@@ -407,22 +353,15 @@
 
   <!-- MOTORS -->
   <div class="panel panel-motor">
-    <div class="panel-header">
-      <div class="dot green"></div>
-      Motor state
-    </div>
+    <div class="panel-header"><div class="dot green"></div>Motor state</div>
     <div class="motor-grid">
-      <!-- Servo -->
       <div class="motor-card">
         <div class="mc-title">Servo — direction</div>
         <div class="mc-val" id="servo-deg">0<span class="mc-unit">°</span></div>
         <div class="servo-vis">
-          <div class="servo-arc">
-            <div class="servo-needle" id="servo-needle"></div>
-          </div>
+          <div class="servo-arc"><div class="servo-needle" id="servo-needle"></div></div>
         </div>
       </div>
-      <!-- DC Motor -->
       <div class="motor-card">
         <div class="mc-title">DC motor — speed</div>
         <div class="mc-val" id="dc-speed">0<span class="mc-unit">%</span></div>
@@ -435,11 +374,9 @@
   <!-- SIDEBAR -->
   <div class="panel-sidebar">
 
-    <!-- VOICE -->
     <div class="panel" style="flex-shrink:0">
       <div class="panel-header">
-        <div class="dot orange"></div>
-        Voice output
+        <div class="dot orange"></div>Voice output
         <div class="tts-wave" id="tts-wave">
           <span></span><span></span><span></span><span></span><span></span>
         </div>
@@ -453,27 +390,21 @@
       </div>
     </div>
 
-    <!-- MEMORY -->
     <div class="panel memory-box">
-      <div class="panel-header">
-        <div class="dot orange"></div>
-        Memory log
-      </div>
+      <div class="panel-header"><div class="dot orange"></div>Memory log</div>
       <div id="memory-log">
-        <div class="mem-entry">Log will appear here…</div>
+        <div class="mem-entry">Nothing remembered yet.</div>
       </div>
       <div class="mem-controls">
         <button class="btn sm" id="btn-cleanup">🧹 Clean now</button>
-        <div class="cleanup-progress">
-          <div class="cleanup-fill" id="cleanup-fill"></div>
-        </div>
+        <div class="cleanup-progress"><div class="cleanup-fill" id="cleanup-fill"></div></div>
         <div class="cleanup-label" id="cleanup-label">—</div>
       </div>
     </div>
 
   </div>
 
-  <!-- SYSTEM LOG (bottom, spans cols 1–2) -->
+  <!-- SYSTEM LOG -->
   <div class="panel panel-log" style="grid-column: 1 / 3; grid-row: 3;">
     <div class="panel-header"><div class="dot"></div>System log</div>
     <div id="sys-log"></div>
@@ -482,23 +413,31 @@
 </main>
 
 <script>
-// ─── CONFIG ─────────────────────────────────────────
-const API_URL = '/api/think'; // Replace with your Python server endpoint
-const MEMORY_FILE_KEY = 'lepotato_memory';
-const CLEANUP_EVERY = 10; // clean memory every N cycles
+// ─── CONFIG ─────────────────────────────────────────────────────────────────
+const API_URL        = '/api/think';
+const WARMUP_URL     = '/api/warmup';
+const CLEANUP_URL    = '/api/cleanup_memory';
+const MEMORY_KEY     = 'lepotato_memory';
+const CLEANUP_EVERY  = 10;       // clean memory every N cycles
 
-// ─── STATE ──────────────────────────────────────────
-let loopTimer = null;
-let cycleCount = 0;
-let intervalSec = 5;
-let currentStream = null;
-let lastSpeech = '';
-let memoryEntries = JSON.parse(localStorage.getItem(MEMORY_FILE_KEY) || '[]');
-let synth = window.speechSynthesis;
-let currentUtterance = null;
-let voices = [];
+// Timeouts: generous for early cycles while models warm up
+const TIMEOUT_WARMUP = 60_000;   // 60s for warmup ping
+const TIMEOUT_CYCLE1 = 120_000;  // 2 min — model load on first real call
+const TIMEOUT_NORMAL = 45_000;   // 45s for all subsequent cycles
 
-// ─── VOICE INIT ─────────────────────────────────────
+// ─── STATE ───────────────────────────────────────────────────────────────────
+let loopTimer    = null;
+let cycleCount   = 0;
+let intervalSec  = 5;
+let lastSpeech   = '';
+let synth        = window.speechSynthesis;
+let voices       = [];
+let isWarmedUp   = false;
+
+// Memory: only entries the AI itself chose to record
+let memoryEntries = JSON.parse(localStorage.getItem(MEMORY_KEY) || '[]');
+
+// ─── VOICE ───────────────────────────────────────────────────────────────────
 function loadVoices() {
   voices = synth.getVoices().filter(v => v.lang.startsWith('en'));
   const sel = document.getElementById('voice-select');
@@ -509,9 +448,7 @@ function loadVoices() {
     opt.textContent = v.name.substring(0, 28);
     sel.appendChild(opt);
   });
-  if (!voices.length) {
-    sel.innerHTML = '<option>No voices available</option>';
-  }
+  if (!voices.length) sel.innerHTML = '<option>No voices available</option>';
 }
 synth.onvoiceschanged = loadVoices;
 loadVoices();
@@ -522,22 +459,19 @@ function speak(text) {
   const utt = new SpeechSynthesisUtterance(text);
   const vi = parseInt(document.getElementById('voice-select').value) || 0;
   if (voices[vi]) utt.voice = voices[vi];
-  utt.rate = 1.0;
+  utt.rate = 0.95;
   utt.pitch = 1.0;
   const wave = document.getElementById('tts-wave');
   utt.onstart = () => wave.classList.add('speaking');
-  utt.onend = () => wave.classList.remove('speaking');
+  utt.onend   = () => wave.classList.remove('speaking');
   synth.speak(utt);
-  currentUtterance = utt;
 }
-
 document.getElementById('btn-speak').onclick = () => speak(lastSpeech);
 
-// ─── CAMERA ─────────────────────────────────────────
+// ─── CAMERA ──────────────────────────────────────────────────────────────────
 async function startWebcam() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-    currentStream = stream;
     const vid = document.getElementById('video-el');
     vid.srcObject = stream;
     vid.style.display = 'block';
@@ -553,61 +487,85 @@ async function startWebcam() {
 document.getElementById('btn-webcam').onclick = startWebcam;
 
 function captureFrame() {
-  const vid = document.getElementById('video-el');
+  const vid    = document.getElementById('video-el');
   const canvas = document.getElementById('snapshot-canvas');
   if (!vid.videoWidth) return null;
   canvas.width = 320; canvas.height = 240;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(vid, 0, 0, 320, 240);
+  canvas.getContext('2d').drawImage(vid, 0, 0, 320, 240);
   document.getElementById('cam-timestamp').textContent = new Date().toLocaleTimeString();
   return canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
 }
 
-// ─── INTERVAL SLIDER ────────────────────────────────
+// ─── INTERVAL SLIDER ─────────────────────────────────────────────────────────
 document.getElementById('interval-slider').oninput = function() {
   intervalSec = parseInt(this.value);
   document.getElementById('interval-val').textContent = intervalSec + 's';
 };
 
-// ─── MAIN LOOP ──────────────────────────────────────
+// ─── WARMUP ──────────────────────────────────────────────────────────────────
+async function warmup() {
+  sysLog('Warming up models (loading into memory)…', 'warn');
+  document.getElementById('live-dot').classList.add('warming');
+  document.getElementById('header-status').textContent = 'warming up models…';
+  document.getElementById('header-spin').classList.remove('hidden');
+
+  try {
+    const resp = await fetch(WARMUP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(TIMEOUT_WARMUP),
+    });
+    if (resp.ok) {
+      const d = await resp.json();
+      sysLog('Models warmed: ' + (d.warmed || []).join(', '), 'ok');
+    }
+  } catch(e) {
+    sysLog('Warmup skipped (' + e.message + ') — first cycle may be slow', 'warn');
+  }
+
+  document.getElementById('live-dot').classList.remove('warming');
+  document.getElementById('live-dot').classList.add('live');
+  document.getElementById('header-spin').classList.add('hidden');
+  isWarmedUp = true;
+}
+
+// ─── MAIN LOOP ───────────────────────────────────────────────────────────────
 async function runCycle() {
   cycleCount++;
   document.getElementById('cycle-count').textContent = cycleCount;
   document.getElementById('header-status').textContent = 'thinking…';
   document.getElementById('header-spin').classList.remove('hidden');
 
-  const imageB64 = captureFrame();
-  const memContext = memoryEntries.slice(-20).join('\n');
+  const imageB64  = captureFrame();
+  // Only send entries the AI chose to record — strip the timestamp prefix when
+  // sending to the AI so it reads its own words back, not a log format.
+  const memForAI  = memoryEntries.map(e => e.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] /, '')).slice(-20).join('\n');
+
+  // Give more time on the very first real cycle in case warmup wasn't enough
+  const timeoutMs = (cycleCount === 1 && !isWarmedUp) ? TIMEOUT_CYCLE1 : TIMEOUT_NORMAL;
 
   try {
-    const payload = {
-      image: imageB64,
-      memory: memContext,
-      cycle: cycleCount
-    };
-
-    // Call backend (Python Flask/FastAPI server on same machine)
     const resp = await fetch(API_URL, {
-      method: 'POST',
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000)
+      body:    JSON.stringify({ image: imageB64, memory: memForAI, cycle: cycleCount }),
+      signal:  AbortSignal.timeout(timeoutMs),
     });
 
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
+    if (data.error) throw new Error(data.error);
 
     updateUI(data);
-    sysLog(`Cycle ${cycleCount} OK — ${data.say ? '"' + data.say.substring(0,40) + '"' : 'no speech'}`, 'ok');
+    sysLog(`Cycle ${cycleCount} OK — ${data.say ? '"' + data.say.substring(0,50) + '"' : '(silent)'}`, 'ok');
 
   } catch(e) {
-    // DEMO MODE: simulate a response when no backend is running
-    const demo = demoResponse(cycleCount);
-    updateUI(demo);
-    sysLog(`Cycle ${cycleCount} — demo mode (${e.message})`, 'warn');
+    sysLog(`Cycle ${cycleCount} failed: ${e.message}`, 'err');
+    // Don't fall back to demo mode — just log the failure and wait for next cycle
   }
 
-  if (cycleCount % CLEANUP_EVERY === 0) {
+  if (cycleCount % CLEANUP_EVERY === 0 && memoryEntries.length > 0) {
     await cleanMemory();
   }
 
@@ -615,69 +573,73 @@ async function runCycle() {
   document.getElementById('header-status').textContent = `cycle ${cycleCount} — next in ${intervalSec}s`;
 }
 
-function demoResponse(n) {
-  const scenarios = [
-    { say: "I see a wall ahead. Turning right.", move: { dir: "right", speed: 40 }, memo: "wall detected at front" },
-    { say: "Path looks clear. Moving forward.", move: { dir: "forward", speed: 65 }, memo: "open corridor ahead" },
-    { say: "Something interesting over there. Investigating.", move: { dir: "left", speed: 30 }, memo: "object on left side" },
-    { say: "I should stop and observe.", move: { dir: "stop", speed: 0 }, memo: "pausing to assess environment" },
-    { say: "Low light. Slowing down to be careful.", move: { dir: "forward", speed: 20 }, memo: "dim lighting detected" },
-  ];
-  return scenarios[n % scenarios.length];
-}
-
-// ─── UI UPDATE ──────────────────────────────────────
+// ─── UI UPDATE ───────────────────────────────────────────────────────────────
 function updateUI(data) {
-  // Speech
-  const sayText = data.say || '';
-  document.getElementById('ai-say').textContent = sayText || '(silent)';
-  if (sayText && sayText !== lastSpeech) {
-    lastSpeech = sayText;
-    document.getElementById('speech-text').textContent = sayText;
-    document.getElementById('speech-text').classList.remove('empty');
-    speak(sayText);
+  // Inner voice
+  const sayText = (data.say || '').trim();
+  const sayEl   = document.getElementById('ai-say');
+  if (sayText) {
+    sayEl.textContent = sayText;
+    sayEl.className = 'ai-value speech';
+    if (sayText !== lastSpeech) {
+      lastSpeech = sayText;
+      document.getElementById('speech-text').textContent = sayText;
+      document.getElementById('speech-text').classList.remove('empty');
+      speak(sayText);
+    }
+  } else {
+    sayEl.textContent = '…';
+    sayEl.className = 'ai-value silent';
   }
 
   // Move
-  const move = data.move || {};
-  const dir = (move.dir || 'stop').toUpperCase();
+  const move  = data.move || {};
+  const dir   = (move.dir || 'stop').toUpperCase();
   const speed = Math.min(100, Math.max(0, move.speed || 0));
-  const servoAngle = dirToAngle(move.dir || 'stop');
-
-  document.getElementById('ai-move').textContent = `dir=${dir} speed=${speed}%`;
-  document.getElementById('servo-deg').innerHTML = servoAngle + '<span class="mc-unit">°</span>';
-  document.getElementById('servo-needle').style.transform = `translateX(-50%) rotate(${servoAngle - 90}deg)`;
-  document.getElementById('dc-speed').innerHTML = speed + '<span class="mc-unit">%</span>';
-  document.getElementById('dc-bar').style.width = speed + '%';
+  const angle = dirToAngle(move.dir || 'stop');
+  document.getElementById('ai-move').textContent = `dir=${dir}  speed=${speed}%`;
+  document.getElementById('servo-deg').innerHTML  = angle + '<span class="mc-unit">°</span>';
+  document.getElementById('servo-needle').style.transform = `translateX(-50%) rotate(${angle - 90}deg)`;
+  document.getElementById('dc-speed').innerHTML   = speed + '<span class="mc-unit">%</span>';
+  document.getElementById('dc-bar').style.width   = speed + '%';
   document.getElementById('dir-badge').textContent = dir;
 
-  // Memo
-  const memo = data.memo || '';
-  document.getElementById('ai-memo').textContent = memo || '—';
-  if (memo) addMemory(memo);
+  // Memo — only shown and stored when non-empty
+  const memo   = (data.memo || '').trim();
+  const memoEl = document.getElementById('ai-memo');
+  if (memo) {
+    memoEl.textContent = memo;
+    memoEl.className = 'ai-value mono';
+    addMemory(memo);
+  } else {
+    memoEl.textContent = 'nothing this cycle';
+    memoEl.className = 'ai-value no-memo';
+  }
 
-  // Raw JSON
   document.getElementById('ai-json').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
 }
 
 function dirToAngle(dir) {
-  const map = { forward: 90, backward: 90, left: 45, right: 135, stop: 90 };
-  return map[dir] || 90;
+  return { forward: 90, backward: 90, left: 45, right: 135, stop: 90 }[dir] || 90;
 }
 
-// ─── MEMORY ─────────────────────────────────────────
+// ─── MEMORY ──────────────────────────────────────────────────────────────────
 function addMemory(entry) {
-  const ts = new Date().toLocaleTimeString();
+  const ts   = new Date().toLocaleTimeString();
   const line = `[${ts}] ${entry}`;
   memoryEntries.push(line);
-  localStorage.setItem(MEMORY_FILE_KEY, JSON.stringify(memoryEntries));
+  localStorage.setItem(MEMORY_KEY, JSON.stringify(memoryEntries));
   renderMemory();
 }
 
 function renderMemory() {
-  const log = document.getElementById('memory-log');
-  log.innerHTML = '';
+  const log    = document.getElementById('memory-log');
   const recent = memoryEntries.slice(-30);
+  if (!recent.length) {
+    log.innerHTML = '<div class="mem-entry">Nothing remembered yet.</div>';
+    return;
+  }
+  log.innerHTML = '';
   recent.forEach((e, i) => {
     const div = document.createElement('div');
     div.className = 'mem-entry' + (i === recent.length - 1 ? ' new' : '');
@@ -690,49 +652,51 @@ function renderMemory() {
 async function cleanMemory() {
   if (!memoryEntries.length) return;
   sysLog('Running memory cleanup…', 'warn');
-  const fill = document.getElementById('cleanup-fill');
+  const fill  = document.getElementById('cleanup-fill');
   const label = document.getElementById('cleanup-label');
   fill.style.width = '0%';
   label.textContent = 'cleaning…';
 
-  // Animate progress
   let p = 0;
-  const tick = setInterval(() => { p = Math.min(90, p + 10); fill.style.width = p + '%'; }, 300);
+  const tick = setInterval(() => { p = Math.min(90, p + 10); fill.style.width = p + '%'; }, 400);
 
   try {
-    const resp = await fetch('/api/cleanup_memory', {
-      method: 'POST',
+    const resp = await fetch(CLEANUP_URL, {
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ entries: memoryEntries }),
-      signal: AbortSignal.timeout(20000)
+      body:    JSON.stringify({ entries: memoryEntries }),
+      signal:  AbortSignal.timeout(60_000),
     });
     if (resp.ok) {
-      const data = await resp.json();
-      memoryEntries = data.cleaned || memoryEntries;
+      const d = await resp.json();
+      const before = memoryEntries.length;
+      memoryEntries = d.cleaned || memoryEntries;
+      sysLog(`Memory cleaned: ${before} → ${memoryEntries.length} entries`, 'ok');
     }
   } catch(e) {
-    // Demo: just dedupe
+    // Local dedup fallback
     const seen = new Set();
     memoryEntries = memoryEntries.filter(e => { if (seen.has(e)) return false; seen.add(e); return true; });
-    sysLog('Memory cleanup done (local dedupe only — no backend)', 'warn');
+    sysLog('Memory cleanup done (local dedup — no backend response)', 'warn');
   }
 
   clearInterval(tick);
   fill.style.width = '100%';
   label.textContent = memoryEntries.length + ' entries';
-  localStorage.setItem(MEMORY_FILE_KEY, JSON.stringify(memoryEntries));
+  localStorage.setItem(MEMORY_KEY, JSON.stringify(memoryEntries));
   setTimeout(() => { fill.style.width = '0%'; label.textContent = '—'; }, 2000);
   renderMemory();
 }
-
 document.getElementById('btn-cleanup').onclick = cleanMemory;
 
-// ─── LOOP CONTROL ────────────────────────────────────
+// ─── LOOP CONTROL ────────────────────────────────────────────────────────────
 document.getElementById('btn-start').onclick = async () => {
   document.getElementById('btn-start').disabled = true;
-  document.getElementById('btn-stop').disabled = false;
-  document.getElementById('live-dot').classList.add('live');
+  document.getElementById('btn-stop').disabled  = false;
+
   await startWebcam();
+  await warmup();           // pre-load models — avoids demo mode on cycle 1
+
   await runCycle();
   loopTimer = setInterval(runCycle, intervalSec * 1000);
 };
@@ -741,13 +705,13 @@ document.getElementById('btn-stop').onclick = () => {
   clearInterval(loopTimer);
   loopTimer = null;
   document.getElementById('btn-start').disabled = false;
-  document.getElementById('btn-stop').disabled = true;
+  document.getElementById('btn-stop').disabled  = true;
   document.getElementById('live-dot').classList.remove('live');
   document.getElementById('header-status').textContent = 'stopped';
   sysLog('Loop stopped', 'warn');
 };
 
-// ─── SYS LOG ────────────────────────────────────────
+// ─── SYS LOG ─────────────────────────────────────────────────────────────────
 function sysLog(msg, cls='') {
   const log = document.getElementById('sys-log');
   const div = document.createElement('div');
@@ -759,21 +723,18 @@ function sysLog(msg, cls='') {
   if (log.children.length > 80) log.removeChild(log.firstChild);
 }
 
-// ─── JSON HIGHLIGHT ─────────────────────────────────
+// ─── JSON HIGHLIGHT ──────────────────────────────────────────────────────────
 function syntaxHighlight(json) {
-  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match) {
+  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, match => {
     let cls = 'num';
-    if (/^"/.test(match)) {
-      if (/:$/.test(match)) cls = 'key';
-      else cls = 'str';
-    }
-    return '<span class="' + cls + '">' + match + '</span>';
+    if (/^"/.test(match)) cls = /:$/.test(match) ? 'key' : 'str';
+    return `<span class="${cls}">${match}</span>`;
   });
 }
 
-// ─── INIT ────────────────────────────────────────────
+// ─── INIT ────────────────────────────────────────────────────────────────────
 renderMemory();
-sysLog('Dashboard ready — Ubuntu 22.04 LTS target', 'ok');
+sysLog('Dashboard ready', 'ok');
 sysLog('Press ▶ Start loop to begin', '');
 </script>
 </body>
