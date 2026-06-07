@@ -19,22 +19,119 @@ GPIO wiring — verified chip/line via `lgpio info PIN gpiod`:
 NOTE: lgpio.tx_pwm() only works on gpiochip0. Pins 16/18/33 are on gpiochip1
 so direction pins are plain digital writes and servo uses a background thread.
 
-Run:
-  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=lepotato.local"
+Run (normal):
   sudo python3 server.py
-  Open browser → https://<lepotato-ip>:5000  (accept the cert warning)
+
+Run (debug — full AI pipeline logging + /api/debug SSE stream):
+  sudo python3 server.py --debug
+  Or set env:  export LEPOTATO_DEBUG=1
+
+Debug endpoints:
+  GET  /api/debug        — SSE stream of live debug events (open in browser)
+  GET  /api/debug/log    — last 200 debug lines as JSON
+  POST /api/debug/toggle — toggle debug on/off at runtime
+
+TLS (required for webcam from a remote browser):
+  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=lepotato.local"
+  sudo python3 server.py [--debug]
+  Open → https://<lepotato-ip>:5000
 """
 
 import json
 import os
 import re
+import sys
 import time
+import queue
 import threading
+import traceback
 import requests as req
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── DEBUG SYSTEM ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DEBUG = '--debug' in sys.argv or os.environ.get('LEPOTATO_DEBUG', '0') == '1'
+
+# ANSI colours for terminal output
+_C = {
+    'reset':  '\033[0m',
+    'grey':   '\033[90m',
+    'cyan':   '\033[96m',
+    'green':  '\033[92m',
+    'yellow': '\033[93m',
+    'red':    '\033[91m',
+    'purple': '\033[95m',
+    'bold':   '\033[1m',
+}
+
+# Ring buffer of recent debug events for /api/debug/log
+_debug_log   = []          # list of dicts
+_debug_lock  = threading.Lock()
+_debug_queue = queue.Queue()   # fed to SSE subscribers
+_MAX_LOG     = 200
+
+_LEVEL_COLOR = {
+    'INFO':  'cyan',
+    'OK':    'green',
+    'WARN':  'yellow',
+    'ERROR': 'red',
+    'PHASE': 'purple',
+    'DATA':  'grey',
+    'TIME':  'green',
+}
+
+def dbg(msg, level='INFO', tag='DEBUG'):
+    """
+    Emit a debug event.  Always goes to the ring buffer and SSE queue.
+    Only prints to terminal if DEBUG is True.
+    level: INFO | OK | WARN | ERROR | PHASE | DATA | TIME
+    """
+    ts    = time.strftime('%H:%M:%S')
+    ms    = int((time.time() % 1) * 1000)
+    stamp = f"{ts}.{ms:03d}"
+
+    event = {
+        'ts':    stamp,
+        'level': level,
+        'tag':   tag,
+        'msg':   str(msg),
+    }
+
+    with _debug_lock:
+        _debug_log.append(event)
+        if len(_debug_log) > _MAX_LOG:
+            _debug_log.pop(0)
+
+    # Always push to SSE queue (subscribers decide)
+    try:
+        _debug_queue.put_nowait(event)
+    except queue.Full:
+        pass
+
+    if DEBUG:
+        col   = _C.get(_LEVEL_COLOR.get(level, 'grey'), '')
+        reset = _C['reset']
+        grey  = _C['grey']
+        bold  = _C['bold']
+        print(f"{grey}{stamp}{reset}  {bold}[{tag}]{reset}  {col}{msg}{reset}", flush=True)
+
+
+def dbg_phase(name):
+    """Print a prominent phase banner in the terminal."""
+    bar = '─' * (52 - len(name))
+    dbg(f"┌── {name} {bar}", level='PHASE', tag='PHASE')
+
+def dbg_time(label, elapsed_s):
+    dbg(f"{label}: {elapsed_s*1000:.0f} ms", level='TIME', tag='TIMING')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── OLLAMA CONFIG ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
 OLLAMA_URL     = "http://localhost:11434"
 VISION_MODEL   = "moondream"
 TEXT_MODEL     = "llama3.2:3b"
@@ -54,20 +151,23 @@ def ollama_models():
     except Exception:
         return []
 
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── GPIO PIN MAP ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 # Verified with: lgpio info <phys_pin> gpiod
 # Format: (chip_index, line_number)
+
 PIN_DC_PWM  = (0,  6)   # phys 12 — chip 0 line 6  — supports tx_pwm
 PIN_DC_DIR1 = (1, 93)   # phys 16 — chip 1 line 93
 PIN_DC_DIR2 = (1, 94)   # phys 18 — chip 1 line 94
 PIN_SERVO   = (1, 85)   # phys 33 — chip 1 line 85 — bit-banged PWM
 
-SERVO_HZ      = 50          # 20 ms period
-DC_PWM_HZ     = 1000        # DC motor PWM frequency
+SERVO_HZ   = 50
+DC_PWM_HZ  = 1000
 
 GPIO_AVAILABLE = False
-_handles = {}       # chip_index → lgpio handle
-_servo_angle = 90   # shared state for servo thread
+_handles     = {}
+_servo_angle = 90
 _servo_lock  = threading.Lock()
 _servo_thread = None
 _servo_stop   = threading.Event()
@@ -80,39 +180,34 @@ try:
             _handles[idx] = lgpio.gpiochip_open(idx)
         return _handles[idx]
 
-    # Claim all output lines
     lgpio.gpio_claim_output(_chip(PIN_DC_PWM[0]),  PIN_DC_PWM[1])
     lgpio.gpio_claim_output(_chip(PIN_DC_DIR1[0]), PIN_DC_DIR1[1])
     lgpio.gpio_claim_output(_chip(PIN_DC_DIR2[0]), PIN_DC_DIR2[1])
     lgpio.gpio_claim_output(_chip(PIN_SERVO[0]),   PIN_SERVO[1])
 
     GPIO_AVAILABLE = True
-    print("[GPIO] lgpio ready — chip0 line6 (DC PWM), chip1 lines 85/93/94")
+    dbg("lgpio ready — chip0 line6 (DC PWM), chip1 lines 85/93/94", level='OK', tag='GPIO')
 
 except Exception as e:
-    print(f"[GPIO] Not available ({e}). Motor commands will be logged only.")
+    dbg(f"Not available: {e}  — motor commands logged only", level='WARN', tag='GPIO')
 
-# ── SERVO BIT-BANG THREAD ────────────────────────────────────────────────────
-# tx_pwm doesn't work on gpiochip1 lines, so we drive the servo manually.
-# A standard servo wants a 50 Hz signal with 0.5–2.5 ms high pulse.
+# ── SERVO BIT-BANG ────────────────────────────────────────────────────────────
 
-SERVO_PERIOD  = 1.0 / SERVO_HZ          # 0.020 s
-SERVO_MIN_PW  = 0.0005                  # 500 µs  → 0°
-SERVO_MAX_PW  = 0.0025                  # 2500 µs → 180°
+SERVO_PERIOD = 1.0 / SERVO_HZ
+SERVO_MIN_PW = 0.0005
+SERVO_MAX_PW = 0.0025
 
 def _servo_pw(angle_deg):
-    """Return pulse width in seconds for a given angle."""
     angle_deg = max(0.0, min(180.0, float(angle_deg)))
     return SERVO_MIN_PW + (angle_deg / 180.0) * (SERVO_MAX_PW - SERVO_MIN_PW)
 
 def _servo_loop():
-    """Background thread: continuously generates servo pulses."""
     chip, line = PIN_SERVO
     h = _chip(chip)
     while not _servo_stop.is_set():
         with _servo_lock:
             angle = _servo_angle
-        pw = _servo_pw(angle)
+        pw  = _servo_pw(angle)
         low = SERVO_PERIOD - pw
         lgpio.gpio_write(h, line, 1)
         time.sleep(pw)
@@ -126,7 +221,7 @@ def start_servo_thread():
     _servo_stop.clear()
     _servo_thread = threading.Thread(target=_servo_loop, daemon=True)
     _servo_thread.start()
-    print("[SERVO] Bit-bang thread started")
+    dbg("Bit-bang thread started", level='OK', tag='SERVO')
 
 def set_servo(angle_deg):
     global _servo_angle
@@ -135,7 +230,7 @@ def set_servo(angle_deg):
     with _servo_lock:
         _servo_angle = max(0.0, min(180.0, float(angle_deg)))
 
-# ── DC MOTOR ─────────────────────────────────────────────────────────────────
+# ── DC MOTOR ──────────────────────────────────────────────────────────────────
 
 def _write(pin_tuple, value):
     if not GPIO_AVAILABLE:
@@ -144,7 +239,6 @@ def _write(pin_tuple, value):
     lgpio.gpio_write(_chip(chip), line, value)
 
 def _pwm(pin_tuple, freq, duty_pct):
-    """Only call this for gpiochip0 pins."""
     if not GPIO_AVAILABLE:
         return
     chip, line = pin_tuple
@@ -172,32 +266,24 @@ def setup_gpio():
         return
     set_servo(90)
     set_dc_motor(0, 'stop')
-    print("[GPIO] Servo centred, DC motor stopped.")
+    dbg("Servo centred, DC motor stopped", level='OK', tag='GPIO')
 
 def apply_move_command(move):
     raw_dir = move.get('dir', 'stop').lower()
     speed   = float(move.get('speed', 0))
-
-    # Servo angle: left/right steer, forward/backward keep centre
-    angle_map = {
-        'forward':  90,
-        'backward': 90,
-        'left':     45,
-        'right':    135,
-        'stop':     90,
-    }
+    angle_map = {'forward': 90, 'backward': 90, 'left': 45, 'right': 135, 'stop': 90}
     servo_angle = angle_map.get(raw_dir, 90)
-
-    # DC motor direction
     dc_dir = raw_dir if raw_dir in ('forward', 'backward') else 'stop'
     if raw_dir in ('left', 'right'):
-        dc_dir = 'forward'   # still drive forward while turning
-
+        dc_dir = 'forward'
     set_servo(servo_angle)
     set_dc_motor(speed, dc_dir)
-    print(f"[MOTOR] dir={raw_dir} speed={speed:.0f}% servo={servo_angle}°")
+    dbg(f"dir={raw_dir}  speed={speed:.0f}%  servo={servo_angle}°", level='OK', tag='MOTOR')
 
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── MEMORY ────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
 MEMORY_PATH = os.path.join(os.path.dirname(__file__), 'memory.log')
 
 def load_memory():
@@ -217,7 +303,10 @@ def append_memory(note):
         f.write(entry + '\n')
     return entry
 
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── AI — OLLAMA ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
 SYSTEM_PROMPT = """You are the mind of a small wheeled robot with a camera.
 Respond ONLY with a valid JSON object. No prose, no markdown, no explanation.
 Required keys:
@@ -246,15 +335,37 @@ def _extract_json(text):
             pass
     raise ValueError(f"No valid JSON found in response: {text[:200]}")
 
-def _fallback_response():
-    return {"say": "", "move": {"dir": "stop", "speed": 0}, "memo": ""}
-
 def query_local(image_b64, memory_context, cycle):
-    models = ollama_models()
-    mem_snippet = (memory_context or "").strip()[-1500:] or "(none)"
+    cycle_tag = f"C{cycle}"
+    t_total   = time.time()
 
+    # ── 1. Check Ollama is up ────────────────────────────────────────────────
+    dbg_phase(f"Cycle {cycle} — AI pipeline")
+    dbg("Checking Ollama availability…", tag=cycle_tag)
+    models = ollama_models()
+    if not models:
+        dbg("Ollama returned no models — is it running?", level='ERROR', tag=cycle_tag)
+        raise RuntimeError("Ollama has no models loaded")
+    dbg(f"Available models: {models}", level='OK', tag=cycle_tag)
+
+    mem_snippet = (memory_context or "").strip()[-1500:] or "(none)"
+    dbg(f"Memory context: {len(mem_snippet)} chars", tag=cycle_tag)
+    if DEBUG:
+        dbg(f"Memory snippet:\n{mem_snippet[:300]}{'…' if len(mem_snippet)>300 else ''}", level='DATA', tag=cycle_tag)
+
+    # ── 2. Vision pass ───────────────────────────────────────────────────────
     description = ""
-    if image_b64 and VISION_MODEL.split(':')[0] in ' '.join(models):
+    vision_model_name = VISION_MODEL.split(':')[0]
+    vision_available  = any(vision_model_name in m for m in models)
+
+    if image_b64:
+        dbg(f"Frame received ({len(image_b64)//1024} KB b64)", tag=cycle_tag)
+    else:
+        dbg("No frame received from dashboard", level='WARN', tag=cycle_tag)
+
+    if image_b64 and vision_available:
+        dbg(f"Sending frame to {VISION_MODEL}…", level='PHASE', tag=cycle_tag)
+        t0 = time.time()
         try:
             vr = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
                 "model": VISION_MODEL,
@@ -262,14 +373,40 @@ def query_local(image_b64, memory_context, cycle):
                 "images": [image_b64],
                 "stream": False,
             })
+            elapsed = time.time() - t0
+            dbg_time(f"{VISION_MODEL} inference", elapsed)
             if vr.ok:
-                description = vr.json().get('response', '').strip()
-                print(f"[VISION] {description}")
+                raw_vision = vr.json()
+                description = raw_vision.get('response', '').strip()
+                dbg(f"Vision description: {description}", level='OK', tag=cycle_tag)
+                if DEBUG:
+                    # Log token counts if Ollama returns them
+                    ec = raw_vision.get('eval_count')
+                    ep = raw_vision.get('eval_duration')
+                    pc = raw_vision.get('prompt_eval_count')
+                    if ec and ep:
+                        tok_s = ec / (ep / 1e9)
+                        dbg(f"Vision tokens: prompt={pc}  eval={ec}  speed={tok_s:.1f} tok/s", level='DATA', tag=cycle_tag)
+            else:
+                dbg(f"Vision HTTP {vr.status_code}: {vr.text[:120]}", level='ERROR', tag=cycle_tag)
+        except req.exceptions.Timeout:
+            dbg(f"Vision timed out after {OLLAMA_TIMEOUT}s", level='ERROR', tag=cycle_tag)
         except Exception as e:
-            print(f"[VISION] Error: {e}")
-
+            dbg(f"Vision exception: {e}", level='ERROR', tag=cycle_tag)
+            if DEBUG:
+                dbg(traceback.format_exc(), level='DATA', tag=cycle_tag)
+    elif not vision_available:
+        dbg(f"{VISION_MODEL} not in model list — skipping vision pass", level='WARN', tag=cycle_tag)
+    
     if not description:
         description = "(no camera image available)"
+        dbg("Using fallback description", level='WARN', tag=cycle_tag)
+
+    # ── 3. Decision pass ─────────────────────────────────────────────────────
+    text_model = TEXT_MODEL
+    if not any(text_model.split(':')[0] in m for m in models):
+        text_model = models[0]
+        dbg(f"{TEXT_MODEL} not found, falling back to {text_model}", level='WARN', tag=cycle_tag)
 
     user_msg = (
         f"Cycle #{cycle}.\n"
@@ -278,11 +415,12 @@ def query_local(image_b64, memory_context, cycle):
         f"Respond with JSON only."
     )
 
-    text_model = TEXT_MODEL
-    if text_model.split(':')[0] not in ' '.join(models) and models:
-        text_model = models[0]
-        print(f"[AI] {TEXT_MODEL} not found, using {text_model}")
+    if DEBUG:
+        dbg(f"System prompt ({len(SYSTEM_PROMPT)} chars):\n{SYSTEM_PROMPT}", level='DATA', tag=cycle_tag)
+        dbg(f"User message:\n{user_msg}", level='DATA', tag=cycle_tag)
 
+    dbg(f"Sending decision prompt to {text_model}…", level='PHASE', tag=cycle_tag)
+    t0 = time.time()
     tr = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
         "model": text_model,
         "system": SYSTEM_PROMPT,
@@ -290,29 +428,55 @@ def query_local(image_b64, memory_context, cycle):
         "stream": False,
         "format": "json",
     })
+    elapsed = time.time() - t0
+    dbg_time(f"{text_model} inference", elapsed)
 
     if not tr.ok:
+        dbg(f"Decision HTTP {tr.status_code}: {tr.text[:200]}", level='ERROR', tag=cycle_tag)
         raise RuntimeError(f"Ollama HTTP {tr.status_code}: {tr.text[:200]}")
 
-    raw = tr.json().get('response', '')
-    result = _extract_json(raw)
+    raw_text = tr.json()
+    raw      = raw_text.get('response', '')
+
+    if DEBUG:
+        ec = raw_text.get('eval_count')
+        ep = raw_text.get('eval_duration')
+        pc = raw_text.get('prompt_eval_count')
+        if ec and ep:
+            tok_s = ec / (ep / 1e9)
+            dbg(f"Decision tokens: prompt={pc}  eval={ec}  speed={tok_s:.1f} tok/s", level='DATA', tag=cycle_tag)
+        dbg(f"Raw model response:\n{raw}", level='DATA', tag=cycle_tag)
+
+    # ── 4. Parse JSON ────────────────────────────────────────────────────────
+    dbg("Parsing JSON response…", tag=cycle_tag)
+    try:
+        result = _extract_json(raw)
+    except ValueError as e:
+        dbg(f"JSON parse failed: {e}", level='ERROR', tag=cycle_tag)
+        raise
+
     result.setdefault('say', '')
     result.setdefault('move', {'dir': 'stop', 'speed': 0})
     result.setdefault('memo', '')
     result['move'].setdefault('dir', 'stop')
     result['move'].setdefault('speed', 0)
+
+    dbg(f"Parsed result: say={repr(result['say'][:40])}  move={result['move']}  memo={repr(result['memo'][:40])}", level='OK', tag=cycle_tag)
+    dbg_time(f"Cycle {cycle} total", time.time() - t_total)
+
     return result
 
 def cleanup_memory_local(entries):
     if len(entries) < 5:
         return entries
 
+    dbg(f"Cleaning {len(entries)} memory entries…", level='PHASE', tag='MEMORY')
     models = ollama_models()
     text_model = TEXT_MODEL
     if text_model.split(':')[0] not in ' '.join(models) and models:
         text_model = models[0]
 
-    blob = '\n'.join(entries[-100:])
+    blob   = '\n'.join(entries[-100:])
     prompt = (
         "You are a memory curator for a robot.\n"
         "Clean this memory log:\n"
@@ -323,66 +487,80 @@ def cleanup_memory_local(entries):
         f"Log:\n{blob}"
     )
 
-    r = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
+    t0 = time.time()
+    r  = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
         "model": text_model,
         "prompt": prompt,
         "stream": False,
         "format": "json",
     })
+    dbg_time("Memory cleanup inference", time.time() - t0)
 
     if not r.ok:
+        dbg(f"Cleanup HTTP {r.status_code}", level='WARN', tag='MEMORY')
         return entries
 
     try:
-        raw = r.json().get('response', '')
+        raw     = r.json().get('response', '')
         cleaned = _extract_json(raw)
         if isinstance(cleaned, list):
+            dbg(f"Cleaned {len(entries)} → {len(cleaned)} entries", level='OK', tag='MEMORY')
             return cleaned
         if isinstance(cleaned, dict):
             for v in cleaned.values():
                 if isinstance(v, list):
+                    dbg(f"Cleaned {len(entries)} → {len(v)} entries", level='OK', tag='MEMORY')
                     return v
     except Exception as e:
-        print(f"[CLEANUP] Parse error: {e}")
+        dbg(f"Cleanup parse error: {e}", level='ERROR', tag='MEMORY')
 
     return entries
 
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── FLASK APP ─────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
 app = Flask(__name__, static_folder='.')
 
 @app.route('/')
 def index():
     return send_from_directory('.', 'lepotato_dashboard.html')
 
+# ── /api/status ───────────────────────────────────────────────────────────────
 @app.route('/api/status')
 def status():
-    up = ollama_available()
+    up     = ollama_available()
     models = ollama_models() if up else []
     return jsonify({
         "ollama": up,
         "models": models,
-        "gpio": GPIO_AVAILABLE,
+        "gpio":   GPIO_AVAILABLE,
+        "debug":  DEBUG,
         "vision_model": VISION_MODEL,
-        "text_model": TEXT_MODEL,
+        "text_model":   TEXT_MODEL,
         "pin_map": {
-            "servo":    f"chip{PIN_SERVO[0]} line{PIN_SERVO[1]} (bit-bang, phys33)",
-            "dc_pwm":   f"chip{PIN_DC_PWM[0]} line{PIN_DC_PWM[1]} (tx_pwm, phys12)",
-            "dc_dir1":  f"chip{PIN_DC_DIR1[0]} line{PIN_DC_DIR1[1]} (phys16)",
-            "dc_dir2":  f"chip{PIN_DC_DIR2[0]} line{PIN_DC_DIR2[1]} (phys18)",
+            "servo":   f"chip{PIN_SERVO[0]} line{PIN_SERVO[1]} (bit-bang, phys33)",
+            "dc_pwm":  f"chip{PIN_DC_PWM[0]} line{PIN_DC_PWM[1]} (tx_pwm, phys12)",
+            "dc_dir1": f"chip{PIN_DC_DIR1[0]} line{PIN_DC_DIR1[1]} (phys16)",
+            "dc_dir2": f"chip{PIN_DC_DIR2[0]} line{PIN_DC_DIR2[1]} (phys18)",
         }
     })
 
+# ── /api/think ────────────────────────────────────────────────────────────────
 @app.route('/api/think', methods=['POST'])
 def think():
     data       = request.get_json(force=True)
     image_b64  = data.get('image')
     memory_ctx = data.get('memory', '')
     cycle      = data.get('cycle', 0)
+    dbg(f"--- /api/think  cycle={cycle}  image={'yes' if image_b64 else 'NO'}  mem_chars={len(memory_ctx)}", tag='REQUEST')
 
     try:
         result = query_local(image_b64, memory_ctx, cycle)
     except Exception as e:
-        print(f"[THINK] Error: {e}")
+        dbg(f"query_local raised: {e}", level='ERROR', tag='THINK')
+        if DEBUG:
+            dbg(traceback.format_exc(), level='DATA', tag='THINK')
         return jsonify({"error": str(e)}), 500
 
     if 'move' in result:
@@ -393,6 +571,7 @@ def think():
 
     return jsonify(result)
 
+# ── /api/cleanup_memory ───────────────────────────────────────────────────────
 @app.route('/api/cleanup_memory', methods=['POST'])
 def cleanup_memory():
     data    = request.get_json(force=True)
@@ -404,30 +583,99 @@ def cleanup_memory():
     except Exception as e:
         return jsonify({"error": str(e), "cleaned": entries}), 200
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# ── /api/debug — SSE live stream ──────────────────────────────────────────────
+@app.route('/api/debug')
+def debug_stream():
+    """
+    Server-Sent Events stream of real-time debug events.
+    Open in browser:  https://<ip>:5000/api/debug
+    Or curl:          curl -k https://<ip>:5000/api/debug
+    """
+    def generate():
+        # First flush the existing log so the client has context
+        with _debug_lock:
+            history = list(_debug_log)
+        for ev in history:
+            yield f"data: {json.dumps(ev)}\n\n"
+
+        # Then stream live events
+        local_q = queue.Queue()
+        # Fan out from the global queue by polling (simple, avoids subscriber list)
+        # We use a per-request queue fed by a poller thread
+        stop = threading.Event()
+
+        def poller():
+            while not stop.is_set():
+                try:
+                    ev = _debug_queue.get(timeout=1)
+                    local_q.put(ev)
+                except queue.Empty:
+                    pass
+
+        t = threading.Thread(target=poller, daemon=True)
+        t.start()
+
+        try:
+            while True:
+                try:
+                    ev = local_q.get(timeout=15)
+                    yield f"data: {json.dumps(ev)}\n\n"
+                except queue.Empty:
+                    # keepalive ping
+                    yield ": keepalive\n\n"
+        except GeneratorExit:
+            stop.set()
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+# ── /api/debug/log — last N events as JSON ────────────────────────────────────
+@app.route('/api/debug/log')
+def debug_log():
+    n = min(int(request.args.get('n', 100)), _MAX_LOG)
+    with _debug_lock:
+        return jsonify({"debug": DEBUG, "events": list(_debug_log)[-n:]})
+
+# ── /api/debug/toggle — flip debug at runtime ─────────────────────────────────
+@app.route('/api/debug/toggle', methods=['POST'])
+def debug_toggle():
+    global DEBUG
+    DEBUG = not DEBUG
+    dbg(f"Debug mode toggled → {'ON' if DEBUG else 'OFF'}", level='WARN', tag='DEBUG')
+    return jsonify({"debug": DEBUG})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── MAIN ──────────────────────────────────════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+
 if __name__ == '__main__':
+    mode_str = f"{_C['purple']}{_C['bold']}DEBUG{_C['reset']}" if DEBUG else "normal"
+    print(f"\n{_C['bold']}Le Potato AI Body — starting in {mode_str} mode{_C['reset']}\n")
+
+    if DEBUG:
+        print(f"  {_C['cyan']}Live debug stream →  https://<ip>:5000/api/debug{_C['reset']}")
+        print(f"  {_C['cyan']}Last 100 events   →  https://<ip>:5000/api/debug/log{_C['reset']}")
+        print(f"  {_C['cyan']}Toggle debug      →  POST https://<ip>:5000/api/debug/toggle{_C['reset']}\n")
+
     setup_gpio()
     start_servo_thread()
 
-    print(f"[AI] Checking Ollama... ", end='', flush=True)
+    dbg(f"Checking Ollama at {OLLAMA_URL}…", tag='STARTUP')
     if ollama_available():
         models = ollama_models()
-        print(f"OK — models: {models}")
+        dbg(f"Ollama OK — models: {models}", level='OK', tag='STARTUP')
         if not models:
-            print(f"[AI] WARNING: No models pulled yet.")
-            print(f"[AI] Run: ollama pull {TEXT_MODEL}")
-            print(f"[AI] Run: ollama pull {VISION_MODEL}")
+            dbg(f"No models found! Run: ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}", level='ERROR', tag='STARTUP')
     else:
-        print("NOT RUNNING")
-        print("[AI] Start Ollama with: ollama serve")
-        print(f"[AI] Then pull models:  ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}")
+        dbg("Ollama NOT reachable — start with: ollama serve", level='ERROR', tag='STARTUP')
+        dbg(f"Pull models after: ollama pull {TEXT_MODEL} && ollama pull {VISION_MODEL}", level='WARN', tag='STARTUP')
 
     if os.path.exists('cert.pem') and os.path.exists('key.pem'):
-        print("[SERVER] HTTPS enabled — open https://<ip>:5000")
+        dbg("HTTPS enabled — cert.pem / key.pem found", level='OK', tag='SERVER')
         ssl_ctx = ('cert.pem', 'key.pem')
     else:
-        print("[SERVER] No cert found — camera will not work from remote browser.")
-        print("[SERVER] Fix: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj '/CN=lepotato.local'")
+        dbg("No TLS cert — webcam from remote browser won't work", level='WARN', tag='SERVER')
+        dbg("Fix: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj '/CN=lepotato.local'", level='WARN', tag='SERVER')
         ssl_ctx = None
 
     app.run(host='0.0.0.0', port=5000, threaded=True, ssl_context=ssl_ctx)
