@@ -17,12 +17,15 @@ Architecture:
 Setup (this PC):
   1. Install Ollama:
        curl -fsSL https://ollama.com/install.sh | sh
-  2. Pull models:
+  2. Pull a vision model (pick one):
+       ollama pull llama3.2-vision     ← recommended (~7.9 GB, best quality)
+       ollama pull gemma4:e4b          ← newer, faster, smaller (~3 GB)
+       ollama pull llava-phi3          ← lightweight fallback (~2.9 GB)
+  3. Pull the decision model:
        ollama pull llama3.2:3b
-       ollama pull moondream
-  3. Install Python deps:
+  4. Install Python deps:
        pip install flask requests
-  4. Run this server:
+  5. Run this server:
        python3 ai_server.py
      Or with debug output:
        python3 ai_server.py --debug
@@ -32,6 +35,25 @@ Setup (Le Potato) — edit server.py, change one line at the top:
 
 Then on the Le Potato run as normal:
        sudo python3 server.py
+
+VISION MODEL NOTES
+──────────────────
+VISION_MODEL controls which model describes the scene.
+
+  "llama3.2-vision"   Best quality scene descriptions. Uses /api/chat endpoint.
+                      ~7.9 GB download. Needs ~8 GB VRAM. Warm inference ~5-8s.
+
+  "gemma4:e4b"        Native multimodal, very fast, newer architecture.
+                      ~3 GB download. Needs ~4 GB VRAM. Warm inference ~3-5s.
+                      Uses configurable visual token budget — set GEMMA4_VISION_TOKENS
+                      lower (e.g. 280) for faster inference or higher (560) for detail.
+
+  "llava-phi3"        Lightweight fallback. ~2.9 GB.
+
+  "moondream"         Only if you're RAM-constrained. Slow and vague on scenes.
+
+Change VISION_MODEL below to switch. The server auto-detects which API
+format to use (/api/chat vs /api/generate).
 """
 
 import json
@@ -54,8 +76,19 @@ LISTEN_HOST    = "0.0.0.0"
 LISTEN_PORT    = 11435          # Le Potato will connect to this port
 
 OLLAMA_URL     = "http://localhost:11434"
-VISION_MODEL   = "moondream"
+
+# ── Vision model ──────────────────────────────────────────────────────────────
+# Recommended: "llama3.2-vision" (best) or "gemma4:e4b" (fast, small)
+VISION_MODEL   = "llama3.2-vision"
+
+# Gemma4 visual token budget — only used when VISION_MODEL starts with "gemma4"
+# Lower = faster; higher = more detail. Supported: 70, 140, 280, 560, 1120
+# For scene captioning 280-560 is the sweet spot.
+GEMMA4_VISION_TOKENS = 280
+
+# ── Decision / text model ─────────────────────────────────────────────────────
 TEXT_MODEL     = "llama3.2:3b"
+
 OLLAMA_TIMEOUT = 120            # seconds — plenty of headroom on a real PC
 
 # Optional: restrict which IPs can call this server (Le Potato's LAN IP).
@@ -129,6 +162,18 @@ def ollama_models():
     except Exception:
         return []
 
+def _vision_model_base():
+    """Return the base name (before colon) for model-presence checks."""
+    return VISION_MODEL.split(':')[0]
+
+def _uses_chat_api(model_name):
+    """
+    llama3.2-vision and gemma4 use /api/chat with message-level images.
+    Older moondream / llava use /api/generate with a top-level images array.
+    """
+    base = model_name.split(':')[0].lower()
+    return base in ('llama3.2-vision', 'gemma4', 'llava-phi3')
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── AI PIPELINE ───────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -166,6 +211,89 @@ def _extract_json(text):
             pass
     raise ValueError(f"No valid JSON in: {text[:200]}")
 
+
+def _vision_describe(image_b64, model_name, cycle_tag):
+    """
+    Call the vision model and return a scene description string.
+    Handles both /api/chat (llama3.2-vision, gemma4) and
+    /api/generate (moondream, llava) transparently.
+    """
+    prompt_text = (
+        "Describe this scene in 2-3 sentences. What objects are present, "
+        "where are they positioned, what is the lighting like, and what is "
+        "immediately notable or unusual?"
+    )
+
+    if _uses_chat_api(model_name):
+        # ── /api/chat format (llama3.2-vision, gemma4) ────────────────────────
+        payload = {
+            "model":  model_name,
+            "stream": False,
+            "messages": [
+                {
+                    "role":    "user",
+                    "content": prompt_text,
+                    "images":  [image_b64],
+                }
+            ],
+        }
+        # Gemma4: pass visual token budget via options to keep inference fast
+        if model_name.split(':')[0].lower() == 'gemma4':
+            payload["options"] = {"num_ctx": GEMMA4_VISION_TOKENS * 4}
+            dbg(f"gemma4 visual token budget: {GEMMA4_VISION_TOKENS}", tag=cycle_tag)
+
+        t0 = time.time()
+        vr = req.post(f"{OLLAMA_URL}/api/chat", timeout=OLLAMA_TIMEOUT, json=payload)
+        elapsed = time.time() - t0
+        dbg_time(f"{model_name} inference", elapsed)
+
+        if not vr.ok:
+            dbg(f"Vision HTTP {vr.status_code}: {vr.text[:120]}", level='ERROR', tag=cycle_tag)
+            return ""
+
+        raw = vr.json()
+        description = raw.get('message', {}).get('content', '').strip()
+
+        if DEBUG:
+            ec = raw.get('eval_count')
+            ep = raw.get('eval_duration')
+            pc = raw.get('prompt_eval_count')
+            if ec and ep:
+                dbg(f"Vision tokens: prompt={pc}  eval={ec}  {ec/(ep/1e9):.1f} tok/s",
+                    level='DATA', tag=cycle_tag)
+        return description
+
+    else:
+        # ── /api/generate format (moondream, llava) ───────────────────────────
+        payload = {
+            "model":  model_name,
+            "prompt": prompt_text,
+            "images": [image_b64],
+            "stream": False,
+        }
+
+        t0 = time.time()
+        vr = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json=payload)
+        elapsed = time.time() - t0
+        dbg_time(f"{model_name} inference", elapsed)
+
+        if not vr.ok:
+            dbg(f"Vision HTTP {vr.status_code}: {vr.text[:120]}", level='ERROR', tag=cycle_tag)
+            return ""
+
+        raw = vr.json()
+        description = raw.get('response', '').strip()
+
+        if DEBUG:
+            ec = raw.get('eval_count')
+            ep = raw.get('eval_duration')
+            pc = raw.get('prompt_eval_count')
+            if ec and ep:
+                dbg(f"Vision tokens: prompt={pc}  eval={ec}  {ec/(ep/1e9):.1f} tok/s",
+                    level='DATA', tag=cycle_tag)
+        return description
+
+
 def run_pipeline(image_b64, memory_context, cycle):
     """
     Full vision + decision pipeline.
@@ -180,45 +308,33 @@ def run_pipeline(image_b64, memory_context, cycle):
     # ── 1. Sanity-check Ollama ───────────────────────────────────────────────
     models = ollama_models()
     if not models:
-        raise RuntimeError("Ollama is running but has no models — run: ollama pull llama3.2:3b && ollama pull moondream")
+        raise RuntimeError(
+            "Ollama is running but has no models. "
+            "Run: ollama pull llama3.2-vision && ollama pull llama3.2:3b"
+        )
     dbg(f"Models available: {models}", level='OK', tag=cycle_tag)
 
     mem_entries = [e.strip() for e in (memory_context or "").strip().splitlines() if e.strip()]
     mem_snippet = "\n".join(mem_entries[-20:]) if mem_entries else "(nothing yet — you are just waking up)"
-    dbg(f"Memory context: {len(mem_snippet)} chars  |  frame: {'YES ' + str(len(image_b64)//1024) + 'KB' if image_b64 else 'NONE'}", tag=cycle_tag)
+    dbg(
+        f"Memory context: {len(mem_snippet)} chars  |  "
+        f"frame: {'YES ' + str(len(image_b64)//1024) + 'KB' if image_b64 else 'NONE'}",
+        tag=cycle_tag,
+    )
 
     # ── 2. Vision pass ───────────────────────────────────────────────────────
-    description       = ""
-    vision_model_name = VISION_MODEL.split(':')[0]
-    vision_available  = any(vision_model_name in m for m in models)
+    description      = ""
+    vision_base      = _vision_model_base()
+    vision_available = any(vision_base in m for m in models)
 
     if image_b64 and vision_available:
         dbg(f"Sending frame to {VISION_MODEL}…", level='PHASE', tag=cycle_tag)
-        t0 = time.time()
         try:
-            vr = req.post(f"{OLLAMA_URL}/api/generate", timeout=OLLAMA_TIMEOUT, json={
-                "model":  VISION_MODEL,
-                "prompt": "Describe this scene in 1-2 sentences. What is immediately notable — objects, open space, walls, light, anything unusual?",
-                "images": [image_b64],
-                "stream": False,
-            })
-            elapsed = time.time() - t0
-            dbg_time(f"{VISION_MODEL} inference", elapsed)
-
-            if vr.ok:
-                raw_vision  = vr.json()
-                description = raw_vision.get('response', '').strip()
+            description = _vision_describe(image_b64, VISION_MODEL, cycle_tag)
+            if description:
                 dbg(f"Vision: {description}", level='OK', tag=cycle_tag)
-
-                if DEBUG:
-                    ec = raw_vision.get('eval_count')
-                    ep = raw_vision.get('eval_duration')
-                    pc = raw_vision.get('prompt_eval_count')
-                    if ec and ep:
-                        dbg(f"Vision tokens: prompt={pc}  eval={ec}  {ec/(ep/1e9):.1f} tok/s", level='DATA', tag=cycle_tag)
             else:
-                dbg(f"Vision HTTP {vr.status_code}: {vr.text[:120]}", level='ERROR', tag=cycle_tag)
-
+                dbg("Vision returned empty response", level='WARN', tag=cycle_tag)
         except req.exceptions.Timeout:
             dbg(f"Vision timed out after {OLLAMA_TIMEOUT}s", level='ERROR', tag=cycle_tag)
         except Exception as e:
@@ -273,7 +389,8 @@ def run_pipeline(image_b64, memory_context, cycle):
         ep = raw_text.get('eval_duration')
         pc = raw_text.get('prompt_eval_count')
         if ec and ep:
-            dbg(f"Decision tokens: prompt={pc}  eval={ec}  {ec/(ep/1e9):.1f} tok/s", level='DATA', tag=cycle_tag)
+            dbg(f"Decision tokens: prompt={pc}  eval={ec}  {ec/(ep/1e9):.1f} tok/s",
+                level='DATA', tag=cycle_tag)
         dbg(f"Raw response:\n{raw}", level='DATA', tag=cycle_tag)
 
     # ── 4. Parse ─────────────────────────────────────────────────────────────
@@ -284,13 +401,17 @@ def run_pipeline(image_b64, memory_context, cycle):
     result['move'].setdefault('dir',   'stop')
     result['move'].setdefault('speed', 0)
 
-    # Normalise — model sometimes returns None instead of ""
     if not result['say']:  result['say']  = ''
     if not result['memo']: result['memo'] = ''
 
-    dbg(f"Result → say={repr(result['say'][:60])}  move={result['move']}  memo={repr(result['memo'][:60])}", level='OK', tag=cycle_tag)
+    dbg(
+        f"Result → say={repr(result['say'][:60])}  "
+        f"move={result['move']}  memo={repr(result['memo'][:60])}",
+        level='OK', tag=cycle_tag,
+    )
     dbg_time(f"Cycle {cycle} total (PC side)", time.time() - t_total)
     return result
+
 
 def run_cleanup(entries):
     """Keep only memories that genuinely matter — experiences, theories, notable finds."""
@@ -344,11 +465,18 @@ def run_cleanup(entries):
 
     return entries
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── FLASK ─────────────────════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+
+# One Ollama request at a time — serialises any concurrent requests rather than
+# letting them race (which tanks throughput). The dashboard now uses a sequential
+# loop so this is belt-and-suspenders, but important during the transition.
+_ollama_lock = threading.Semaphore(1)
+
 
 def _check_allowed():
     if ALLOWED_HOSTS is None:
@@ -358,6 +486,7 @@ def _check_allowed():
         dbg(f"Rejected request from {client}", level='WARN', tag='AUTH')
         return jsonify({"error": "forbidden"}), 403
     return None
+
 
 # ── /api/think ────────────────────────────────────────────────────────────────
 @app.route('/api/think', methods=['POST'])
@@ -372,7 +501,15 @@ def think():
     cycle      = data.get('cycle', 0)
     client_ip  = request.remote_addr
 
-    dbg(f"← /api/think  from={client_ip}  cycle={cycle}  frame={'yes' if image_b64 else 'NO'}  mem={len(memory_ctx)}ch", tag='REQUEST')
+    dbg(
+        f"← /api/think  from={client_ip}  cycle={cycle}  "
+        f"frame={'yes' if image_b64 else 'NO'}  mem={len(memory_ctx)}ch",
+        tag='REQUEST',
+    )
+
+    if not _ollama_lock.acquire(blocking=True, timeout=OLLAMA_TIMEOUT + 10):
+        dbg("Lock timeout — Ollama busy, dropping request", level='WARN', tag='THINK')
+        return jsonify({"error": "server busy — previous cycle still running"}), 503
 
     try:
         result = run_pipeline(image_b64, memory_ctx, cycle)
@@ -381,9 +518,12 @@ def think():
         if DEBUG:
             dbg(traceback.format_exc(), level='DATA', tag='THINK')
         return jsonify({"error": str(e)}), 500
+    finally:
+        _ollama_lock.release()
 
     dbg(f"→ responding to {client_ip}", level='OK', tag='REQUEST')
     return jsonify(result)
+
 
 # ── /api/cleanup_memory ───────────────────────────────────────────────────────
 @app.route('/api/cleanup_memory', methods=['POST'])
@@ -403,6 +543,7 @@ def cleanup_memory():
         dbg(f"Cleanup error: {e}", level='ERROR', tag='MEMORY')
         return jsonify({"error": str(e), "cleaned": entries}), 200
 
+
 # ── /api/status ───────────────────────────────────────────────────────────────
 @app.route('/api/status')
 def status():
@@ -414,10 +555,12 @@ def status():
         "models":        models,
         "debug":         DEBUG,
         "vision_model":  VISION_MODEL,
+        "vision_api":    "chat" if _uses_chat_api(VISION_MODEL) else "generate",
         "text_model":    TEXT_MODEL,
         "listen":        f"{LISTEN_HOST}:{LISTEN_PORT}",
         "allowed_hosts": list(ALLOWED_HOSTS) if ALLOWED_HOSTS else "any",
     })
+
 
 # ── /api/debug — SSE live stream ──────────────────────────────────────────────
 @app.route('/api/debug')
@@ -451,8 +594,11 @@ def debug_stream():
         except GeneratorExit:
             stop.set()
 
-    return Response(generate(), mimetype='text/event-stream',
-                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    return Response(
+        generate(), mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
 
 @app.route('/api/debug/log')
 def debug_log():
@@ -460,12 +606,14 @@ def debug_log():
     with _debug_lock:
         return jsonify({"debug": DEBUG, "events": list(_debug_log)[-n:]})
 
+
 @app.route('/api/debug/toggle', methods=['POST'])
 def debug_toggle():
     global DEBUG
     DEBUG = not DEBUG
     dbg(f"Debug toggled → {'ON' if DEBUG else 'OFF'}", level='WARN', tag='DEBUG')
     return jsonify({"debug": DEBUG})
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── STARTUP ───────────────────────────────────────────────────────────────────
@@ -480,13 +628,24 @@ if __name__ == '__main__':
     if ollama_available():
         models = ollama_models()
         dbg(f"Ollama OK  models={models}", level='OK', tag='STARTUP')
-        missing = []
-        if not any(VISION_MODEL.split(':')[0] in m for m in models):
-            missing.append(VISION_MODEL)
+
+        vision_base = _vision_model_base()
+        if not any(vision_base in m for m in models):
+            dbg(
+                f"Vision model '{VISION_MODEL}' not found. "
+                f"Run: ollama pull {VISION_MODEL}",
+                level='WARN', tag='STARTUP',
+            )
+        else:
+            api_type = "chat" if _uses_chat_api(VISION_MODEL) else "generate"
+            dbg(f"Vision model: {VISION_MODEL}  API: /api/{api_type}", level='OK', tag='STARTUP')
+
         if not any(TEXT_MODEL.split(':')[0] in m for m in models):
-            missing.append(TEXT_MODEL)
-        if missing:
-            dbg(f"Missing models — run: ollama pull {' && ollama pull '.join(missing)}", level='WARN', tag='STARTUP')
+            dbg(
+                f"Text model '{TEXT_MODEL}' not found. "
+                f"Run: ollama pull {TEXT_MODEL}",
+                level='WARN', tag='STARTUP',
+            )
     else:
         dbg("Ollama NOT reachable! Start it: ollama serve", level='ERROR', tag='STARTUP')
 
@@ -500,6 +659,9 @@ if __name__ == '__main__':
 {_C['bold']}Connection instructions{_C['reset']}
   On Le Potato — edit server.py and set:
     {_C['cyan']}OFFLOAD_URL = "http://{lan_ip}:{LISTEN_PORT}"{_C['reset']}
+
+  Vision model in use: {_C['cyan']}{VISION_MODEL}{_C['reset']}
+  To switch model, edit VISION_MODEL at the top of this file.
 
   Debug stream (open in browser):
     {_C['cyan']}http://{lan_ip}:{LISTEN_PORT}/api/debug{_C['reset']}
